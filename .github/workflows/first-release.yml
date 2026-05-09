@@ -1,0 +1,17 @@
+name: Publish first release
+
+# Bootstrap v0.1.0 when this workflow is first added to main. Later releases use tags.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/first-release.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: v0.1.0
+      bootstrap: true

@@ -1,0 +1,6 @@
+/target/
+/artifacts/
+/.cargo-home/
+/.vs/
+*.log
+*.pdb

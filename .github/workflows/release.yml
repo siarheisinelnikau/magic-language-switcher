@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      bootstrap:
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Clippy
+        run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo +stable test --locked --all-features
+      - name: Build portable EXE
+        run: |
+          cargo +stable build --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
+      - name: Package and verify release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid release tag.' }
+          ./tools/package-release.ps1 -Version $env:RELEASE_TAG.Substring(1) -SkipBuild
+          $notes = "docs/releases/$env:RELEASE_TAG.md"
+          if (-not (Test-Path -LiteralPath $notes)) { throw "Missing release notes: $notes" }
+      - name: Publish release after assets are uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          BOOTSTRAP: ${{ inputs.bootstrap || false }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $directory = "artifacts/$tag"
+          $executable = "$directory/MagicLanguageSwitcher-$tag-windows-x64.exe"
+          $existing = gh release view $tag --json isDraft 2>$null
+          $releaseExists = $LASTEXITCODE -eq 0
+          if ($releaseExists -and -not ($existing | ConvertFrom-Json).isDraft) {
+            Write-Output "Release $tag is already published."
+            exit 0
+          }
+          if ($env:BOOTSTRAP -eq 'true') {
+            $tagCommit = gh api "repos/$env:GH_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              gh api --method POST "repos/$env:GH_REPO/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:GITHUB_SHA" >$null
+              if ($LASTEXITCODE -ne 0) { throw 'Could not create the initial release tag.' }
+            } elseif ($tagCommit -ne $env:GITHUB_SHA) {
+              throw 'The existing release tag points to a different commit.'
+            }
+          }
+          if (-not $releaseExists) {
+            gh release create $tag --verify-tag --draft --title "$tag — Magic Language Switcher" --notes-file "docs/releases/$tag.md"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release.' }
+          }
+          gh release upload $tag $executable "$directory/SHA256SUMS.txt" --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; the release remains a draft.' }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release.' }
