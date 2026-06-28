@@ -98,7 +98,7 @@ impl Engine {
                 converted,
             });
             native::switch_layout(target.window, conversion.destination);
-            Ok("Text corrected. Ctrl+F8 undoes the last fix.".into())
+            Ok("Text corrected.".into())
         })();
         if last_word && !replaced && target.ensure_active().is_ok() {
             let _ = native::chord(VK_RIGHT, &[]);

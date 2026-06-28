@@ -1,5 +1,8 @@
 use super::native::wide;
-use crate::layout::Selection;
+use crate::{
+    layout::Selection,
+    shortcuts::{Shortcut, Shortcuts},
+};
 use std::ptr::{null, null_mut};
 use std::{fs, path::PathBuf};
 use windows_sys::Win32::{Foundation::*, System::Registry::*};
@@ -7,7 +10,17 @@ use windows_sys::Win32::{Foundation::*, System::Registry::*};
 const STARTUP_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const STARTUP_NAME: &str = "MagicLanguageSwitcher";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Preferences {
+    pub selection: Selection,
+    pub shortcuts: Shortcuts,
+}
+
 fn preferences_path() -> Option<PathBuf> {
+    #[cfg(feature = "desktop-tests")]
+    if let Some(path) = std::env::var_os("MAGIC_LANGUAGE_SWITCHER_SETTINGS") {
+        return Some(PathBuf::from(path));
+    }
     std::env::var_os("LOCALAPPDATA").map(|root| {
         PathBuf::from(root)
             .join("MagicLanguageSwitcher")
@@ -15,45 +28,65 @@ fn preferences_path() -> Option<PathBuf> {
     })
 }
 
-pub fn load_selection() -> Selection {
+pub fn load() -> Preferences {
     preferences_path()
         .and_then(|path| fs::read_to_string(path).ok())
-        .map_or(Selection::default(), |text| parse_selection(&text))
+        .map_or(Preferences::default(), |text| parse_preferences(&text))
 }
 
-fn parse_selection(text: &str) -> Selection {
-    let mut selection = Selection::default();
+fn parse_preferences(text: &str) -> Preferences {
+    let mut preferences = Preferences::default();
     for line in text.lines() {
         if let Some((name, value)) = line.split_once('=') {
-            let id = u32::from_str_radix(value.trim(), 16).ok();
             match name.trim() {
-                "source" => selection.from = id,
-                "destination" => selection.to = id,
-                _ => {}
+                "source" => preferences.selection.from = u32::from_str_radix(value.trim(), 16).ok(),
+                "destination" => {
+                    preferences.selection.to = u32::from_str_radix(value.trim(), 16).ok()
+                }
+                name => {
+                    let index = match name {
+                        "hotkey_last_word" => 0,
+                        "hotkey_selection" => 1,
+                        "hotkey_undo" => 2,
+                        _ => continue,
+                    };
+                    if let Some(shortcut) = Shortcut::decode(value.trim()) {
+                        preferences.shortcuts.0[index] = shortcut;
+                    }
+                }
             }
         }
     }
-    selection
+    if preferences.shortcuts.validate().is_err() {
+        preferences.shortcuts = Shortcuts::default();
+    }
+    preferences
 }
 
-pub fn save_selection(selection: Selection) -> Result<(), String> {
-    #[cfg(feature = "desktop-tests")]
-    if std::env::var("MAGIC_LANGUAGE_SWITCHER_SMOKE").as_deref() == Ok("1") {
-        return Ok(());
-    }
+fn serialize(preferences: Preferences) -> String {
+    let value = |id: Option<u32>| id.map_or_else(|| "auto".into(), |id| format!("{id:08X}"));
+    format!(
+        "source={}\ndestination={}\nhotkey_last_word={}\nhotkey_selection={}\nhotkey_undo={}\n",
+        value(preferences.selection.from),
+        value(preferences.selection.to),
+        preferences.shortcuts.0[0].encode(),
+        preferences.shortcuts.0[1].encode(),
+        preferences.shortcuts.0[2].encode()
+    )
+}
+
+pub fn save(preferences: Preferences) -> Result<(), String> {
+    preferences.shortcuts.validate().map_err(str::to_owned)?;
     let path = preferences_path().ok_or("Windows did not provide a local settings folder.")?;
     let directory = path.parent().ok_or("Invalid settings path.")?;
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
-    let value = |id: Option<u32>| id.map_or_else(|| "auto".into(), |id| format!("{id:08X}"));
-    let text = format!(
-        "source={}\ndestination={}\n",
-        value(selection.from),
-        value(selection.to)
-    );
     let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&temporary, text)
-        .and_then(|()| fs::rename(temporary, path))
-        .map_err(|error| format!("Could not save layout preferences: {error}"))
+    fs::write(&temporary, serialize(preferences))
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            format!("Could not save settings: {error}")
+        })
 }
 
 fn command() -> Result<String, String> {
@@ -148,18 +181,56 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shortcuts::{CTRL, SHIFT};
+
     #[test]
-    fn preferences_accept_any_layout_identifier_and_ignore_unknown_keys() {
+    fn old_layout_settings_keep_default_shortcuts() {
+        let value = parse_preferences("source=00000407\ndestination=F0020409\nunknown=ignored");
         assert_eq!(
-            parse_selection("source=00000407\ndestination=F0020409\nunknown=ignored"),
+            value.selection,
             Selection {
                 from: Some(0x407),
                 to: Some(0xF0020409)
             }
         );
+        assert_eq!(value.shortcuts, Shortcuts::default());
         assert_eq!(
-            parse_selection("source=auto\ndestination=invalid"),
-            Selection::default()
+            parse_preferences("source=auto\ndestination=invalid"),
+            Preferences::default()
+        );
+    }
+
+    #[test]
+    fn changing_layouts_does_not_drop_shortcut_preferences() {
+        let mut preferences = Preferences::default();
+        preferences.shortcuts = preferences
+            .shortcuts
+            .updated(
+                0,
+                Shortcut {
+                    key: 0x4b,
+                    modifiers: CTRL | SHIFT,
+                },
+            )
+            .unwrap();
+        preferences.selection = Selection {
+            from: Some(0x4090409),
+            to: Some(0x4190419),
+        };
+        assert_eq!(parse_preferences(&serialize(preferences)), preferences);
+        preferences.selection.to = None;
+        assert_eq!(parse_preferences(&serialize(preferences)), preferences);
+    }
+
+    #[test]
+    fn malformed_and_duplicate_saved_shortcuts_are_recoverable() {
+        assert_eq!(
+            parse_preferences("hotkey_last_word=0002:0077").shortcuts,
+            Shortcuts::default()
+        );
+        assert_eq!(
+            parse_preferences("hotkey_last_word=0008:0045\nhotkey_undo=not-a-key").shortcuts,
+            Shortcuts::default()
         );
     }
 }

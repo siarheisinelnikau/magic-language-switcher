@@ -14,19 +14,25 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 ## Get started
 
-1. Download `MagicLanguageSwitcher-v0.1.0-windows-x64.exe` from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest).
+1. Download `MagicLanguageSwitcher-v0.1.1-windows-x64.exe` from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest).
 2. Put it in a folder you want to keep and run it. No installer, .NET, browser engine, or VC++ redistributable is needed.
 3. Leave the caret after a mistyped word and press **F8**, or select some text and press **Shift+F8**.
 
-Requires **Windows 10 version 1607 or newer, or Windows 11, x64**. This first release is unsigned.
+Requires **Windows 10 version 1607 or newer, or Windows 11, x64**. The release is unsigned.
 
 ## Shortcuts
 
-| Shortcut | Action |
+| Default shortcut | Action |
 | --- | --- |
 | **F8** | Convert the last word, using the editor's word-selection behavior |
 | **Shift+F8** | Convert the selected text |
 | **Ctrl+F8** | Undo the last correction immediately, in the same editor |
+
+**To change a shortcut:** click its button in settings, press the new combination, and release the keys to save. **Esc** cancels; **Backspace** restores that action's default. The buttons replace the previous shortcut labels without increasing the window size.
+
+Use Ctrl, Alt, and/or Shift with a key, function keys (except Windows-reserved F12), or supported toggle keys such as Pause, Caps Lock, and Scroll Lock. Ordinary typing keys need Ctrl or Alt. Windows-key shortcuts are not supported. Avoid Ctrl+Alt combinations that overlap AltGr characters in your keyboard layout.
+
+Each action needs a distinct shortcut. If a combination belongs to another app, or settings cannot be saved, the previous binding stays active. Recording ends when you leave the settings window. Preferences survive restart and changes to the conversion layouts.
 
 Undo checks that the text before the caret still matches the last correction. If the text or caret has changed, it refuses to replace anything. A selection can contain up to **4,096 UTF-16 code units**, including line breaks and tabs.
 
@@ -48,17 +54,17 @@ This is physical-key conversion, not translation or transliteration. **IME candi
 
 - **Pause** temporarily disables correction shortcuts; the language icon remains available.
 - **Start with Windows** adds this EXE to your own user's startup entries. Keep the EXE in its final folder before enabling it; disable the option before moving or deleting it.
-- Layout choices are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
+- Layout choices and shortcuts are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
 - Run with `--background` to start directly in the tray.
 - **About** contains the version, project link, and an expandable MIT license.
 
 ## Privacy and compatibility
 
-The app works offline. It has no telemetry, network service, continuous keyboard hook, or typing log. It reads text only when you invoke a correction and keeps one undo record in memory.
+The app works offline. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
 
 Correction temporarily uses the clipboard to read selected text; multiline text is pasted back as plain text. Existing clipboard formats are duplicated and restored, and a newer clipboard value is not overwritten. Windows clipboard history or clipboard managers may retain the temporary text. Unusual app-owned clipboard formats can prevent a correction if they cannot be preserved.
 
-Use an editable field that supports normal selection and copy/paste. Native password fields are excluded. Read-only controls, games, terminals, custom editors, and apps running as administrator may reject or reinterpret input. Text formatting is not preserved when replacing a rich-text selection. If a global shortcut is already registered by another app, settings and a tray notification report the conflict.
+Use an editable field that supports normal selection and copy/paste. Native password fields are excluded. Read-only controls, games, terminals, custom editors, and apps running as administrator may reject or reinterpret input. Text formatting is not preserved when replacing a rich-text selection. If a global shortcut is already registered by another app, choose a different combination in settings.
 
 ## Build from source
 
@@ -78,10 +84,10 @@ Create the same release assets used on GitHub:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1
 ```
 
-This builds a Windows x64 EXE, checks its PE imports, and writes the EXE and `SHA256SUMS.txt` to `artifacts\v0.1.0\`. To compare a downloaded file's checksum:
+This builds a Windows x64 EXE, checks its PE imports, and writes the EXE and `SHA256SUMS.txt` to `artifacts\v0.1.1\`. To compare a downloaded file's checksum:
 
 ```powershell
-Get-FileHash .\MagicLanguageSwitcher-v0.1.0-windows-x64.exe -Algorithm SHA256
+Get-FileHash .\MagicLanguageSwitcher-v0.1.1-windows-x64.exe -Algorithm SHA256
 ```
 
 ## Tests
@@ -96,6 +102,7 @@ Pure conversion tests also run on Linux. The opt-in Windows desktop test starts 
 
 ```powershell
 cargo test --locked --features desktop-tests --test desktop -- --ignored --test-threads=1 --nocapture
+cargo test --locked --all-features failed_persistence -- --ignored --test-threads=1
 ```
 
 ## Project structure
@@ -103,6 +110,8 @@ cargo test --locked --features desktop-tests --test desktop -- --ignored --test-
 | Path | Purpose |
 | --- | --- |
 | `src/layout.rs` | Layout-independent physical-key conversion and source selection |
+| `src/shortcuts.rs` | Shortcut values, validation, and English key names |
+| `src/platform/hotkeys.rs` | Registration, conflict rollback, and temporary shortcut recording |
 | `src/platform/keyboard.rs` | Installed layout discovery and Windows keyboard tables |
 | `src/platform/correction.rs` | Correction and verified undo |
 | `src/platform/clipboard.rs` | Clipboard snapshots and restoration |
@@ -115,9 +124,7 @@ The Windows mappings use [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/
 
 ## Releases and contributions
 
-CI checks formatting, Clippy, and tests on Windows and Linux. Pushing a version tag such as `v0.1.0` runs the Windows release workflow: validate, build, inspect DLL imports, create checksums, upload assets to a draft, then publish it. See [CONTRIBUTING.md](CONTRIBUTING.md) for the release procedure.
-
-The first `v0.1.0` release is bootstrapped by the **Publish first release** workflow when that workflow file is initially pushed to `main`. Subsequent releases use version tags.
+CI checks formatting, Clippy, and tests on Windows and Linux. Bump the stable Cargo package version, add its release notes, and push to `main`; **Publish version** publishes the version only if it is not already public. The release job validates the source, builds the EXE, inspects DLL imports, creates checksums, and uploads assets to a draft before publishing. Version tags remain supported for manual releases. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Inspired by the one-key layout correction workflow of [Mahou](https://github.com/Sippelin/Mahou3). This is an independent implementation.
 
