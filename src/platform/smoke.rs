@@ -9,14 +9,22 @@ use std::{
     path::Path,
     process::{Child, Command},
     ptr::{null, null_mut},
+    sync::atomic::{AtomicBool, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
     Foundation::*,
     System::{LibraryLoader::*, Threading::*},
-    UI::{Controls::EM_SETSEL, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    UI::{
+        Controls::{EM_GETSEL, EM_SETSEL},
+        Input::KeyboardAndMouse::*,
+        Shell::{DefSubclassProc, SetWindowSubclass},
+        WindowsAndMessaging::*,
+    },
 };
+
+static BLOCK_COPY: AtomicBool = AtomicBool::new(false);
 
 pub fn run(binary: &Path) -> Result<(), String> {
     // SAFETY: the test registers its own class, creates only test-owned windows, and pumps
@@ -78,6 +86,9 @@ pub fn run(binary: &Path) -> Result<(), String> {
             instance,
             null(),
         );
+        if SetWindowSubclass(editor, Some(copy_line_when_empty), 1, 0) == 0 {
+            return Err("Could not install the editor regression fixture.".into());
+        }
         let password = CreateWindowExW(
             0,
             wide("EDIT").as_ptr(),
@@ -195,6 +206,29 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 )
             };
             prepare("before ghbdtn")?;
+            check_accessible_selection(false)?;
+            SendMessageW(editor, EM_SETSEL, 7, 13);
+            check_accessible_selection(true)?;
+            prepare("before ghbdtn")?;
+            {
+                let owner = host as usize;
+                let worker = thread::spawn(move || -> Result<String, String> {
+                    let mut clipboard = Session::capture(owner)?;
+                    let copied = clipboard.copy_selection()?;
+                    clipboard.restore()?;
+                    Ok(copied)
+                });
+                while !worker.is_finished() {
+                    pump_for(Duration::from_millis(15));
+                }
+                let copied = worker
+                    .join()
+                    .map_err(|_| "Editor fixture worker panicked.")??;
+                check(
+                    copied == "before ghbdtn",
+                    "Editor fixture copies a whole line with no selection",
+                )?;
+            }
             trigger(
                 VK_SPACE,
                 "before привет",
@@ -225,17 +259,117 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 window_text(editor) == "привет changed",
                 "Undo refuses changed text",
             )?;
-            prepare("ghbdtn")?;
-            shortcut(VK_RETURN)?;
-            pump_for(Duration::from_millis(1000));
+            prepare("")?;
+            shortcut(VK_SPACE)?;
+            pump_for(Duration::from_millis(900));
             check(
-                window_text(editor) == "ghbdtn",
-                "Empty selection does not replace text",
+                window_text(editor).is_empty(),
+                "Empty editor remains unchanged",
             )?;
             check(
                 clipboard::read_text()? == "clipboard sentinel",
-                "Empty selection preserves clipboard",
+                "Empty editor preserves clipboard",
             )?;
+            prepare("before ghbdtn after")?;
+            SendMessageW(editor, EM_SETSEL, 7, 13);
+            trigger(
+                VK_SPACE,
+                "before привет after",
+                "Selection takes priority without extending its bounds",
+            )?;
+            trigger(
+                VK_BACK,
+                "before ghbdtn after",
+                "Undo restores a selected correction",
+            )?;
+            prepare("before ghbdtn after")?;
+            SendMessageW(editor, EM_SETSEL, 13, 7);
+            trigger(
+                VK_SPACE,
+                "before привет after",
+                "Backward selections use the same correction key",
+            )?;
+            prepare("ghbdtn 123 vbh")?;
+            SendMessageW(editor, EM_SETSEL, 7, 10);
+            shortcut(VK_SPACE)?;
+            pump_for(Duration::from_millis(650));
+            check(
+                window_text(editor) == "ghbdtn 123 vbh",
+                "Unchanged selection does not fall back to the last word",
+            )?;
+            let range = SendMessageW(editor, EM_GETSEL, 0, 0) as u32;
+            check(
+                range & 0xffff == 7 && range >> 16 == 10,
+                "An unchanged selection stays selected",
+            )?;
+            prepare("ghbdtn")?;
+            native::chord(VK_F8, &[VK_SHIFT])?;
+            pump_for(Duration::from_millis(200));
+            check(
+                window_text(editor) == "ghbdtn",
+                "Retired Shift+F8 binding is not registered",
+            )?;
+            trigger(
+                VK_SPACE,
+                "привет",
+                "No selection converts the last word using the same key",
+            )?;
+            prepare("before ghbdtn")?;
+            SendMessageW(editor, EM_SETSEL, 7, 13);
+            {
+                use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+                if OpenClipboard(host) == 0 {
+                    return Err("Could not reserve the test clipboard.".into());
+                }
+                struct BusyClipboard;
+                impl Drop for BusyClipboard {
+                    fn drop(&mut self) {
+                        // SAFETY: this guard owns the clipboard opened on this test thread.
+                        unsafe {
+                            CloseClipboard();
+                        }
+                    }
+                }
+                let _clipboard = BusyClipboard;
+                shortcut(VK_SPACE)?;
+                pump_for(Duration::from_millis(650));
+                check(
+                    window_text(editor) == "before ghbdtn",
+                    "Busy clipboard does not trigger a fallback edit",
+                )?;
+                let range = SendMessageW(editor, EM_GETSEL, 0, 0) as u32;
+                check(
+                    range & 0xffff == 7 && range >> 16 == 13,
+                    "Clipboard failure preserves the selected range",
+                )?;
+            }
+            prepare("before ghbdtn")?;
+            SendMessageW(editor, EM_SETSEL, 7, 13);
+            {
+                struct CopyFailure;
+                impl Drop for CopyFailure {
+                    fn drop(&mut self) {
+                        BLOCK_COPY.store(false, Ordering::Relaxed);
+                    }
+                }
+                let _failure = CopyFailure;
+                BLOCK_COPY.store(true, Ordering::Relaxed);
+                shortcut(VK_SPACE)?;
+                pump_for(Duration::from_millis(950));
+                check(
+                    window_text(editor) == "before ghbdtn",
+                    "Failed selection copy does not fall back to another range",
+                )?;
+                let range = SendMessageW(editor, EM_GETSEL, 0, 0) as u32;
+                check(
+                    range & 0xffff == 7 && range >> 16 == 13,
+                    "Failed selection copy leaves the range intact",
+                )?;
+                check(
+                    clipboard::read_text()? == "clipboard sentinel",
+                    "Failed selection copy preserves the clipboard",
+                )?;
+            }
             let oversized = "a".repeat(4097);
             prepare(&oversized)?;
             SendMessageW(editor, EM_SETSEL, 0, -1);
@@ -337,8 +471,7 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 )?;
             }
             record_binding(app, 0, VK_F9, &[VK_CONTROL, VK_SHIFT], "Ctrl+Shift+F9")?;
-            record_binding(app, 1, VK_F19, &[VK_MENU], "Alt+F19")?;
-            record_binding(app, 2, VK_F10, &[VK_CONTROL, VK_SHIFT], "Ctrl+Shift+F10")?;
+            record_binding(app, 1, VK_F10, &[VK_CONTROL, VK_SHIFT], "Ctrl+Shift+F10")?;
             begin_recording(app, 0)?;
             native::chord(VK_ESCAPE, &[])?;
             wait_for(
@@ -349,7 +482,7 @@ pub fn run(binary: &Path) -> Result<(), String> {
             activate(host);
             SetFocus(editor);
             wait_for(
-                || window_text(GetDlgItem(app, 121)) == "Alt+F19",
+                || window_text(GetDlgItem(app, 121)) == "Ctrl+Shift+F10",
                 "Leaving settings cancels shortcut capture",
             )?;
             prepare("ghbdtn")?;
@@ -362,7 +495,7 @@ pub fn run(binary: &Path) -> Result<(), String> {
             native::chord(VK_F9, &[VK_CONTROL, VK_SHIFT])?;
             wait_for(
                 || window_text(editor) == "привет",
-                "Custom last-word shortcut works",
+                "Unified custom shortcut corrects the last word",
             )?;
             pump_for(Duration::from_millis(500));
             check(
@@ -377,10 +510,10 @@ pub fn run(binary: &Path) -> Result<(), String> {
             pump_for(Duration::from_millis(500));
             prepare("Ghbdtn vbh!")?;
             SendMessageW(editor, EM_SETSEL, 0, -1);
-            native::chord(VK_F19, &[VK_MENU])?;
+            native::chord(VK_F9, &[VK_CONTROL, VK_SHIFT])?;
             wait_for(
                 || window_text(editor) == "Привет мир!",
-                "Custom selection shortcut works",
+                "The same custom shortcut corrects selected text",
             )?;
             pump_for(Duration::from_millis(500));
             let mut final_bounds = RECT::default();
@@ -395,6 +528,14 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 || matches!(process.0.try_wait(), Ok(Some(_))),
                 "Exit before persistence check",
             )?;
+            let legacy = std::fs::read_to_string(&settings_path)
+                .map_err(|error| error.to_string())?
+                .replace("hotkey_correct=", "hotkey_last_word=");
+            std::fs::write(
+                &settings_path,
+                format!("{legacy}hotkey_selection=0001:0082\n"),
+            )
+            .map_err(|error| error.to_string())?;
             process.0 = spawn_app()?;
             wait_for(
                 || !FindWindowW(wide(WINDOW_CLASS).as_ptr(), null()).is_null(),
@@ -404,7 +545,7 @@ pub fn run(binary: &Path) -> Result<(), String> {
             pump_for(Duration::from_millis(400));
             check(
                 window_text(GetDlgItem(app, 120)) == "Ctrl+Shift+F9",
-                "Custom shortcut survives app restart",
+                "Legacy correction shortcut survives migration and restart",
             )?;
             prepare("ghbdtn")?;
             native::chord(VK_F9, &[VK_CONTROL, VK_SHIFT])?;
@@ -425,6 +566,55 @@ pub fn run(binary: &Path) -> Result<(), String> {
         })();
         let restored = original_clipboard.restore_current();
         result.and(restored)
+    }
+}
+
+fn check_accessible_selection(expected: bool) -> Result<(), String> {
+    let worker = thread::spawn(super::selection::accessible_selection);
+    while !worker.is_finished() {
+        pump_for(Duration::from_millis(15));
+    }
+    let actual = worker
+        .join()
+        .map_err(|_| "Selection probe worker panicked.")??;
+    check(
+        actual == Some(expected),
+        "Windows accessibility distinguishes selection from the caret",
+    )
+}
+
+/// Emulate editors that copy the current line with no selection. Unified correction
+/// must inspect selection state first rather than accidentally replacing the whole line.
+unsafe extern "system" fn copy_line_when_empty(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    // SAFETY: this callback belongs to the test-owned edit on its creating thread.
+    unsafe {
+        if message == WM_COPY {
+            if BLOCK_COPY.load(Ordering::Relaxed) {
+                return 0;
+            }
+            let mut start = 0u32;
+            let mut end = 0u32;
+            SendMessageW(
+                window,
+                EM_GETSEL,
+                &mut start as *mut u32 as usize,
+                &mut end as *mut u32 as isize,
+            );
+            if start == end {
+                SendMessageW(window, EM_SETSEL, 0, -1);
+                let result = DefSubclassProc(window, message, wparam, lparam);
+                SendMessageW(window, EM_SETSEL, start as usize, end as isize);
+                return result;
+            }
+        }
+        DefSubclassProc(window, message, wparam, lparam)
     }
 }
 
@@ -507,11 +697,10 @@ fn select_pair(app: HWND, source_language: u16, destination_language: u16) -> Re
 }
 
 fn shortcut(action_key: u16) -> Result<(), String> {
-    // Legacy test selectors describe word, selection, and undo; the product uses the F8 family.
-    let modifiers: &[u16] = match action_key {
-        VK_RETURN => &[VK_SHIFT],
-        VK_BACK => &[VK_CONTROL],
-        _ => &[],
+    let modifiers: &[u16] = if action_key == VK_BACK {
+        &[VK_CONTROL]
+    } else {
+        &[]
     };
     native::chord(VK_F8, modifiers)
 }

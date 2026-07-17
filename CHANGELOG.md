@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.2 — 2026-10-30
+
+- Manual GitHub update checks from About and the tray menu, with in-app download and restart.
+- HTTPS downloads validated against release metadata and SHA256SUMS, with a temporary helper, EXE backup, and cleanup.
+- Isolated integration checks verify actual EXE replacement, restart, cancellation, and temporary-file cleanup.
+
+- One correction shortcut: selected text takes priority; otherwise the last word is corrected.
+- Separate, customizable undo shortcut remains available.
+- Two shortcut fields and a smaller 464 × 487 logical-pixel settings window.
+- Existing last-word and undo bindings migrate automatically; the selection binding is retired.
+- Native selection and UI Automation probes avoid treating copy-current-line behavior as a selection.
+- A failed or unchanged selection never falls back to another range.
+- Clipboard snapshots use the correct GDI APIs for bitmaps and enhanced metafiles, avoiding an invalid memory-size query on image handles.
+- Desktop regression checks cover partial/backward selections, empty input, copy failures, clipboard contention, settings migration, and custom shortcuts.
+
 ## 0.1.1 — 2026-10-30
 
 - Editable shortcut buttons in the existing settings rows; window dimensions are unchanged.

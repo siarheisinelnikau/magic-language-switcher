@@ -6,7 +6,7 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{GlobalFree, HANDLE, HWND},
-    Graphics::Gdi::{DeleteEnhMetaFile, DeleteMetaFile, DeleteObject},
+    Graphics::Gdi::{CopyEnhMetaFileW, DeleteEnhMetaFile, DeleteMetaFile, DeleteObject},
     System::{DataExchange::*, Memory::*, Ole::*},
 };
 
@@ -41,7 +41,7 @@ impl Drop for Format {
         if self.handle.is_null() {
             return;
         }
-        // SAFETY: OleDuplicateData transfers ownership of the duplicate to us. Each format
+        // SAFETY: duplicate_data transfers ownership of the duplicate to us. Each format
         // requires its corresponding Win32 destructor until SetClipboardData takes ownership.
         unsafe {
             match self.id as u16 {
@@ -69,7 +69,9 @@ impl Drop for Format {
     }
 }
 
-/// Eagerly duplicates every clipboard format before sending Ctrl+C. The clipboard is
+/// Eagerly duplicates payload formats before sending Ctrl+C. OLE's owner-specific
+/// transport bookkeeping is excluded; its advertised payloads are copied separately.
+/// The clipboard is
 /// never left open while an editor handles input. Newer clipboard values take priority.
 pub(super) struct Session {
     formats: Vec<Format>,
@@ -89,6 +91,16 @@ impl Session {
         unsafe {
             let mut id = EnumClipboardFormats(0);
             while id != 0 {
+                let mut name = [0u16; 256];
+                let length = GetClipboardFormatNameW(id, name.as_mut_ptr(), name.len() as i32)
+                    .max(0) as usize;
+                if matches!(
+                    String::from_utf16_lossy(&name[..length]).as_str(),
+                    "DataObject" | "Ole Private Data"
+                ) {
+                    id = EnumClipboardFormats(id);
+                    continue;
+                }
                 if (CF_PRIVATEFIRST as u32..=CF_GDIOBJLAST as u32).contains(&id)
                     || id == CF_OWNERDISPLAY as u32
                 {
@@ -100,12 +112,7 @@ impl Session {
                         "Could not preserve the current clipboard. Try copying it again.".into(),
                     );
                 }
-                if GlobalSize(data) > 64 * 1024 * 1024 {
-                    return Err(
-                        "The clipboard is too large to preserve. Copy a smaller item first.".into(),
-                    );
-                }
-                let handle = OleDuplicateData(data, id as u16, GMEM_MOVEABLE);
+                let handle = duplicate_data(data, id);
                 if handle.is_null() {
                     return Err(
                         "Could not preserve the current clipboard format. Copy plain text first."
@@ -120,6 +127,12 @@ impl Session {
     }
 
     pub fn copy_selection(&mut self) -> Result<String, String> {
+        self.try_copy_selection()?.ok_or_else(|| {
+            "No text to correct. Place the caret after a word, or select text in an editor.".into()
+        })
+    }
+
+    pub fn try_copy_selection(&mut self) -> Result<Option<String>, String> {
         let previous = sequence();
         super::native::chord(0x43, &[0x11])?;
         for _ in 0..40 {
@@ -130,11 +143,15 @@ impl Session {
             }
             self.owned_sequence = Some(current);
             match read_text() {
-                Ok(text) => return Ok(text),
+                Ok(text) => return Ok(Some(text)),
                 Err(_) => continue,
             }
         }
-        Err("No text to correct. Place the caret after a word, or select text in an editor.".into())
+        if sequence() == previous {
+            Ok(None)
+        } else {
+            Err("Could not read the copied text. Nothing was changed.".into())
+        }
     }
 
     pub fn paste(&mut self, text: &str) -> Result<(), String> {
@@ -183,6 +200,46 @@ impl Session {
     pub fn restore_current(&mut self) -> Result<(), String> {
         self.owned_sequence = Some(sequence());
         self.restore()
+    }
+}
+
+fn duplicate_data(data: HANDLE, id: u32) -> HANDLE {
+    // SAFETY: capture holds the clipboard open. GDI formats need their matching clone
+    // API; other payloads are copied only within the size of their locked HGLOBAL.
+    unsafe {
+        match id as u16 {
+            CF_BITMAP | CF_DSPBITMAP => OleDuplicateData(data, CF_BITMAP, GMEM_MOVEABLE),
+            CF_PALETTE => OleDuplicateData(data, CF_PALETTE, GMEM_MOVEABLE),
+            CF_METAFILEPICT | CF_DSPMETAFILEPICT => {
+                OleDuplicateData(data, CF_METAFILEPICT, GMEM_MOVEABLE)
+            }
+            CF_ENHMETAFILE | CF_DSPENHMETAFILE => CopyEnhMetaFileW(data, std::ptr::null()),
+            _ => {
+                let size = GlobalSize(data);
+                if size == 0 || size > 64 * 1024 * 1024 {
+                    return null_mut();
+                }
+                let source = GlobalLock(data);
+                if source.is_null() {
+                    return null_mut();
+                }
+                let copy = GlobalAlloc(GMEM_MOVEABLE, size);
+                if copy.is_null() {
+                    GlobalUnlock(data);
+                    return null_mut();
+                }
+                let destination = GlobalLock(copy);
+                if destination.is_null() {
+                    GlobalUnlock(data);
+                    GlobalFree(copy);
+                    return null_mut();
+                }
+                copy_nonoverlapping(source as *const u8, destination as *mut u8, size);
+                GlobalUnlock(copy);
+                GlobalUnlock(data);
+                copy
+            }
+        }
     }
 }
 
@@ -250,4 +307,44 @@ pub(super) fn write_text(owner: usize, text: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::Graphics::Gdi::{CloseEnhMetaFile, CreateBitmap, CreateEnhMetaFileW};
+
+    #[test]
+    fn clones_bitmap_and_enhanced_metafile_with_gdi_apis() {
+        // SAFETY: the test creates and destroys its own GDI objects without touching the clipboard.
+        unsafe {
+            let bitmap = CreateBitmap(2, 2, 1, 1, [0u8; 4].as_ptr() as *const _);
+            assert!(!bitmap.is_null());
+            let copy = Format {
+                id: CF_BITMAP as u32,
+                handle: duplicate_data(bitmap, CF_BITMAP as u32),
+            };
+            assert!(!copy.handle.is_null());
+            assert_ne!(copy.handle, bitmap);
+            DeleteObject(bitmap);
+            drop(copy);
+            let dc = CreateEnhMetaFileW(
+                null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            assert!(!dc.is_null());
+            let metafile = CloseEnhMetaFile(dc);
+            assert!(!metafile.is_null());
+            let copy = Format {
+                id: CF_ENHMETAFILE as u32,
+                handle: duplicate_data(metafile, CF_ENHMETAFILE as u32),
+            };
+            assert!(!copy.handle.is_null());
+            assert_ne!(copy.handle, metafile);
+            DeleteEnhMetaFile(metafile);
+            drop(copy);
+        }
+    }
 }

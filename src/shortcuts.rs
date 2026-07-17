@@ -103,17 +103,13 @@ fn key_name(key: u16) -> Option<String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Shortcuts(pub [Shortcut; 3]);
+pub struct Shortcuts(pub [Shortcut; 2]);
 
 impl Default for Shortcuts {
     fn default() -> Self {
         Self([
             Shortcut {
                 modifiers: 0,
-                key: 0x77,
-            },
-            Shortcut {
-                modifiers: SHIFT,
                 key: 0x77,
             },
             Shortcut {
@@ -148,10 +144,7 @@ mod tests {
     fn defaults_are_unique_and_displayed_in_english() {
         let defaults = Shortcuts::default();
         assert!(defaults.validate().is_ok());
-        assert_eq!(
-            defaults.0.map(|value| value.to_string()),
-            ["F8", "Shift+F8", "Ctrl+F8"]
-        );
+        assert_eq!(defaults.0.map(|value| value.to_string()), ["F8", "Ctrl+F8"]);
         assert_eq!(
             Shortcut {
                 key: 0x2e,
@@ -164,9 +157,9 @@ mod tests {
     #[test]
     fn duplicate_replacement_does_not_mutate_the_previous_set() {
         let original = Shortcuts::default();
-        assert!(original.updated(0, original.0[2]).is_err());
+        assert!(original.updated(0, original.0[1]).is_err());
         assert_eq!(original, Shortcuts::default());
-        assert!(original.updated(3, original.0[0]).is_err());
+        assert!(original.updated(2, original.0[0]).is_err());
     }
     #[test]
     fn serialization_round_trips_custom_bindings() {

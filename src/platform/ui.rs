@@ -4,7 +4,7 @@ use super::{
     correction::{Action, Engine},
     keyboard,
     native::{Target, wide},
-    settings,
+    settings, updater,
 };
 use crate::{
     layout::{Catalog, Selection},
@@ -14,7 +14,11 @@ use std::{
     cell::RefCell,
     mem::size_of,
     ptr::{null, null_mut},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
 };
 use windows_sys::Win32::{
@@ -39,6 +43,7 @@ const TO_ID: usize = 110;
 const SHORTCUT_FIRST_ID: usize = 120;
 const OPEN_ID: usize = 201;
 const TRAY_PAUSE_ID: usize = 202;
+const UPDATE_ID: usize = 206;
 const BG: u32 = rgb(246, 248, 252);
 const INK: u32 = rgb(29, 43, 66);
 const MUTED: u32 = rgb(99, 112, 131);
@@ -73,6 +78,16 @@ struct Capture {
     held_modifiers: u16,
 }
 
+enum UpdateResult {
+    Checked(Result<Option<crate::updates::Update>, String>),
+    Installed(Result<(), String>),
+}
+struct UpdateJob {
+    results: mpsc::Receiver<UpdateResult>,
+    cancel: Arc<AtomicBool>,
+    worker: thread::JoinHandle<()>,
+}
+
 struct App {
     window: HWND,
     tray_icon: HICON,
@@ -104,6 +119,7 @@ struct App {
     work: Option<mpsc::Sender<Request>>,
     results: Option<mpsc::Receiver<Result<String, String>>>,
     worker: Option<thread::JoinHandle<()>>,
+    update: Option<UpdateJob>,
 }
 
 impl App {
@@ -140,6 +156,7 @@ impl App {
             work: None,
             results: None,
             worker: None,
+            update: None,
         }
     }
     fn s(&self, value: i32) -> i32 {
@@ -250,7 +267,7 @@ impl App {
         self.create_fonts();
         self.label("Magic Language Switcher", [24, 22, 416, 30], 2, INK, BG);
         self.label(
-            "Fix the wrong layout in one keypress.",
+            "Selection first; otherwise the last word.",
             [24, 57, 416, 20],
             4,
             MUTED,
@@ -299,13 +316,9 @@ impl App {
             WHITE,
         );
         self.populate_layouts();
-        for (index, (y, title)) in [
-            (222, "Fix last word"),
-            (261, "Fix selected text"),
-            (300, "Undo last fix"),
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, (y, title)) in [(222, "Correct text"), (261, "Undo last fix")]
+            .into_iter()
+            .enumerate()
         {
             self.label(title, [24, y + 5, 204, 25], 0, INK, BG);
             self.widget(
@@ -319,11 +332,11 @@ impl App {
                 PALE,
             );
         }
-        self.label("Try it here", [36, 359, 392, 22], 1, INK, WHITE);
+        self.label("Try it here", [36, 320, 392, 22], 1, INK, WHITE);
         self.input = self.widget(
             "EDIT",
             "",
-            [36, 391, 170, 27],
+            [36, 352, 170, 27],
             INPUT_ID,
             WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
             0,
@@ -333,18 +346,18 @@ impl App {
         self.output = self.widget(
             "EDIT",
             "",
-            [258, 391, 170, 27],
+            [258, 352, 170, 27],
             OUTPUT_ID,
             WS_TABSTOP | WS_BORDER | (ES_AUTOHSCROLL | ES_READONLY) as u32,
             0,
             INK,
             BG,
         );
-        self.label("→", [222, 390, 28, 28], 3, BLUE, WHITE);
+        self.label("→", [222, 351, 28, 28], 3, BLUE, WHITE);
         self.subtitle = self.widget(
             "STATIC",
             "Click a shortcut to change it.",
-            [24, 446, 416, 20],
+            [24, 407, 416, 20],
             107,
             SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
             4,
@@ -354,7 +367,7 @@ impl App {
         let startup = self.widget(
             "BUTTON",
             "Start with Windows",
-            [24, 480, 275, 26],
+            [24, 441, 275, 26],
             STARTUP_ID,
             WS_TABSTOP | BS_AUTOCHECKBOX as u32,
             0,
@@ -364,7 +377,7 @@ impl App {
         self.widget(
             "BUTTON",
             "About",
-            [356, 478, 84, 28],
+            [356, 439, 84, 28],
             ABOUT_ID,
             WS_TABSTOP | BS_PUSHBUTTON as u32,
             4,
@@ -527,6 +540,11 @@ impl App {
         }
     }
     fn notify(&self, message: &str) {
+        // Keep isolated desktop checks from opening system toasts over their editor.
+        #[cfg(feature = "desktop-tests")]
+        if std::env::var_os("MAGIC_LANGUAGE_SWITCHER_SETTINGS").is_some() {
+            return;
+        }
         let mut data = self.tray_data();
         data.uFlags = NIF_INFO;
         data.dwInfoFlags = NIIF_INFO;
@@ -575,7 +593,7 @@ impl App {
         self.set_text(self.status, status);
     }
     fn shortcut_button(&self, index: usize) -> HWND {
-        // SAFETY: shortcut indexes are validated before querying our three child controls.
+        // SAFETY: shortcut indexes are validated before querying our two child controls.
         unsafe { GetDlgItem(self.window, (SHORTCUT_FIRST_ID + index) as i32) }
     }
     fn show_shortcuts(&self) {
@@ -719,7 +737,7 @@ impl App {
         self.refresh_status();
     }
     fn command(&mut self, id: usize, notification: u32) {
-        if (SHORTCUT_FIRST_ID..SHORTCUT_FIRST_ID + 3).contains(&id) {
+        if (SHORTCUT_FIRST_ID..SHORTCUT_FIRST_ID + 2).contains(&id) {
             self.cancel_capture();
             self.begin_capture(id - SHORTCUT_FIRST_ID);
             return;
@@ -730,8 +748,11 @@ impl App {
             PAUSE_ID | TRAY_PAUSE_ID => self.toggle_pause(),
             OPEN_ID => self.open(),
             QUIT_ID => {
-                if self.busy {
+                if self.busy || self.update.is_some() {
                     self.exit_requested = true;
+                    if let Some(job) = &self.update {
+                        job.cancel.store(true, Ordering::Relaxed);
+                    }
                 } else {
                     // SAFETY: only our own root window is destroyed; WM_DESTROY ends the loop.
                     unsafe {
@@ -778,18 +799,22 @@ impl App {
                 }
                 self.update_preview();
             }
-            ABOUT_ID => about::show(self.window, self.icon),
+            ABOUT_ID => {
+                if about::show(self.window, self.icon) {
+                    self.check_updates();
+                }
+            }
+            UPDATE_ID => self.check_updates(),
             _ => {}
         }
     }
     fn hotkey(&mut self, id: usize) {
-        if !self.enabled || self.busy || self.capture.is_some() {
+        if !self.enabled || self.busy || self.capture.is_some() || self.exit_requested {
             return;
         }
         let action = match id {
-            1 => Action::LastWord,
-            2 => Action::Selection,
-            3 => Action::Undo,
+            1 => Action::Correct,
+            2 => Action::Undo,
             _ => return,
         };
         self.set_text(self.subtitle, "Correcting text...");
@@ -823,7 +848,7 @@ impl App {
             match result {
                 Ok(message) => {
                     let message = if message == "Text corrected." {
-                        format!("{message} {} undoes the last fix.", self.shortcuts.0[2])
+                        format!("{message} {} undoes the last fix.", self.shortcuts.0[1])
                     } else {
                         message
                     };
@@ -834,15 +859,118 @@ impl App {
                     self.notify(&error);
                 }
             }
-            if self.exit_requested {
-                // SAFETY: pending clipboard restoration is finished before the owner window closes.
-                unsafe {
-                    DestroyWindow(self.window);
-                }
-                return;
+        }
+        self.poll_update();
+        if self.exit_requested && !self.busy && self.update.is_none() {
+            // SAFETY: correction and update workers have finished before the owner closes.
+            unsafe {
+                DestroyWindow(self.window);
             }
+            return;
         }
         self.refresh_tray_language();
+    }
+    fn start_update(&mut self, update: Option<crate::updates::Update>) {
+        if self.update.is_some() || self.exit_requested {
+            return;
+        }
+        let installing = update.is_some();
+        let (sender, results) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        match thread::Builder::new()
+            .name("github-update".into())
+            .spawn(move || {
+                let result = match update {
+                    Some(update) => {
+                        UpdateResult::Installed(updater::install(&update, &worker_cancel))
+                    }
+                    None => UpdateResult::Checked(updater::check(&worker_cancel)),
+                };
+                let _ = sender.send(result);
+            }) {
+            Ok(worker) => {
+                self.update = Some(UpdateJob {
+                    results,
+                    cancel,
+                    worker,
+                });
+                self.set_text(
+                    self.subtitle,
+                    if installing {
+                        "Downloading and verifying update..."
+                    } else {
+                        "Checking GitHub for updates..."
+                    },
+                );
+            }
+            Err(error) => about::update_status(
+                self.window,
+                &format!("Could not start the update: {error}"),
+                true,
+            ),
+        }
+    }
+    fn check_updates(&mut self) {
+        if self.update.is_some() {
+            self.notify("An update check or download is already in progress.");
+            return;
+        }
+        self.start_update(None);
+    }
+    fn poll_update(&mut self) {
+        let result = self
+            .update
+            .as_ref()
+            .and_then(|job| match job.results.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(UpdateResult::Checked(Err(
+                    "The update worker stopped unexpectedly.".into(),
+                ))),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        let Some(result) = result else {
+            return;
+        };
+        if let Some(job) = self.update.take() {
+            let _ = job.worker.join();
+        }
+        if self.exit_requested {
+            return;
+        }
+        match result {
+            UpdateResult::Checked(Ok(Some(update))) => {
+                self.set_text(
+                    self.subtitle,
+                    &format!("Version {} is available.", update.version),
+                );
+                if about::offer_update(self.window, &update) {
+                    self.start_update(Some(update));
+                }
+            }
+            UpdateResult::Checked(Ok(None)) => {
+                self.set_text(self.subtitle, "You are up to date.");
+                about::update_status(
+                    self.window,
+                    &format!(
+                        "You are up to date. Installed version: {}.",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    false,
+                );
+            }
+            UpdateResult::Checked(Err(error)) | UpdateResult::Installed(Err(error)) => {
+                self.set_text(
+                    self.subtitle,
+                    "Update failed. Your current app is unchanged.",
+                );
+                about::update_status(self.window, &error, true);
+            }
+            UpdateResult::Installed(Ok(())) => {
+                self.set_text(self.subtitle, "Restarting to finish the update...");
+                self.exit_requested = true;
+            }
+        }
     }
     fn refresh_tray_language(&mut self) {
         let language = current_language();
@@ -872,7 +1000,7 @@ impl App {
             let dc = BeginPaint(self.window, &mut paint);
             FillRect(dc, &paint.rcPaint, self.brush(BG));
             let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            for (rect, color) in [([24, 85, 416, 51], GREEN), ([24, 346, 416, 90], WHITE)] {
+            for (rect, color) in [([24, 85, 416, 51], GREEN), ([24, 307, 416, 90], WHITE)] {
                 let old = SelectObject(dc, self.brush(color));
                 RoundRect(
                     dc,
@@ -963,6 +1091,17 @@ impl App {
                 })
                 .as_ptr(),
             );
+            AppendMenuW(
+                menu,
+                MF_STRING | if self.update.is_some() { MF_GRAYED } else { 0 },
+                UPDATE_ID,
+                wide(if self.update.is_some() {
+                    "Update in progress..."
+                } else {
+                    "Check for updates"
+                })
+                .as_ptr(),
+            );
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, QUIT_ID, wide("Quit").as_ptr());
             let mut point = POINT::default();
@@ -989,6 +1128,10 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         self.capture_hook.take();
+        if let Some(job) = self.update.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+            let _ = job.worker.join();
+        }
         self.work.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -1239,6 +1382,9 @@ pub fn show_error(error: &str) {
 }
 
 pub fn run() -> Result<(), String> {
+    if updater::command_mode()? {
+        return Ok(());
+    }
     // SAFETY: the window classes use static function pointers, App remains boxed until every
     // window is destroyed, and the message loop dispatches only initialized MSG values.
     unsafe {
@@ -1289,12 +1435,12 @@ pub fn run() -> Result<(), String> {
         let mut area = RECT::default();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut RECT as *mut _, 0);
         let scale = (GetDpiForSystem() as f32 / 96.0)
-            .min(((area.bottom - area.top - 64) as f32 / 526.0).max(0.75));
+            .min(((area.bottom - area.top - 64) as f32 / 487.0).max(0.75));
         let app = Box::new(RefCell::new(App::new(instance, icon, scale)));
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
         let mut bounds = RECT {
             right: (464.0 * scale) as i32,
-            bottom: (526.0 * scale) as i32,
+            bottom: (487.0 * scale) as i32,
             ..Default::default()
         };
         AdjustWindowRectExForDpi(&mut bounds, style, 0, 0, (scale * 96.0) as u32);

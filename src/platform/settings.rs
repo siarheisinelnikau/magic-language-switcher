@@ -36,6 +36,8 @@ pub fn load() -> Preferences {
 
 fn parse_preferences(text: &str) -> Preferences {
     let mut preferences = Preferences::default();
+    let mut correct = None;
+    let mut legacy_correct = None;
     for line in text.lines() {
         if let Some((name, value)) = line.split_once('=') {
             match name.trim() {
@@ -43,19 +45,19 @@ fn parse_preferences(text: &str) -> Preferences {
                 "destination" => {
                     preferences.selection.to = u32::from_str_radix(value.trim(), 16).ok()
                 }
-                name => {
-                    let index = match name {
-                        "hotkey_last_word" => 0,
-                        "hotkey_selection" => 1,
-                        "hotkey_undo" => 2,
-                        _ => continue,
-                    };
+                "hotkey_correct" => correct = Shortcut::decode(value.trim()),
+                "hotkey_last_word" => legacy_correct = Shortcut::decode(value.trim()),
+                "hotkey_undo" => {
                     if let Some(shortcut) = Shortcut::decode(value.trim()) {
-                        preferences.shortcuts.0[index] = shortcut;
+                        preferences.shortcuts.0[1] = shortcut;
                     }
                 }
+                _ => {}
             }
         }
+    }
+    if let Some(shortcut) = correct.or(legacy_correct) {
+        preferences.shortcuts.0[0] = shortcut;
     }
     if preferences.shortcuts.validate().is_err() {
         preferences.shortcuts = Shortcuts::default();
@@ -66,12 +68,11 @@ fn parse_preferences(text: &str) -> Preferences {
 fn serialize(preferences: Preferences) -> String {
     let value = |id: Option<u32>| id.map_or_else(|| "auto".into(), |id| format!("{id:08X}"));
     format!(
-        "source={}\ndestination={}\nhotkey_last_word={}\nhotkey_selection={}\nhotkey_undo={}\n",
+        "source={}\ndestination={}\nhotkey_correct={}\nhotkey_undo={}\n",
         value(preferences.selection.from),
         value(preferences.selection.to),
         preferences.shortcuts.0[0].encode(),
-        preferences.shortcuts.0[1].encode(),
-        preferences.shortcuts.0[2].encode()
+        preferences.shortcuts.0[1].encode()
     )
 }
 
@@ -220,6 +221,43 @@ mod tests {
         assert_eq!(parse_preferences(&serialize(preferences)), preferences);
         preferences.selection.to = None;
         assert_eq!(parse_preferences(&serialize(preferences)), preferences);
+    }
+
+    #[test]
+    fn legacy_last_word_and_undo_shortcuts_migrate_to_two_actions() {
+        let migrated = parse_preferences(
+            "hotkey_last_word=0006:0078\nhotkey_selection=0001:0082\nhotkey_undo=0006:0079",
+        );
+        assert_eq!(
+            migrated.shortcuts.0[0],
+            Shortcut {
+                modifiers: CTRL | SHIFT,
+                key: 0x78
+            }
+        );
+        assert_eq!(
+            migrated.shortcuts.0[1],
+            Shortcut {
+                modifiers: CTRL | SHIFT,
+                key: 0x79
+            }
+        );
+        let serialized = serialize(migrated);
+        assert!(!serialized.contains("hotkey_selection"));
+        assert!(!serialized.contains("hotkey_last_word"));
+        assert_eq!(parse_preferences(&serialized), migrated);
+    }
+
+    #[test]
+    fn explicit_unified_binding_takes_precedence_over_the_legacy_name() {
+        let migrated = parse_preferences("hotkey_correct=0002:004B\nhotkey_last_word=0006:0078");
+        assert_eq!(
+            migrated.shortcuts.0[0],
+            Shortcut {
+                modifiers: CTRL,
+                key: 0x4b
+            }
+        );
     }
 
     #[test]
