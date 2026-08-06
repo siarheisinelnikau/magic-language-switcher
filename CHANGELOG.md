@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Standalone EXE assets use `MagicLanguageSwitcher-vVERSION.exe`; architecture suffixes are reserved for releases with multiple executable architecture variants.
+- Release packaging, uploads, and generated SHA-256 entries use the same filename.
+- The updated release reader accepts standalone, explicit x64, and historical asset names while rejecting x86 and ARM64 variants.
+- README download links retain the published v0.1.2 filename and explain the one-time manual upgrade required for its older updater.
+
 ## 0.1.2 — 2026-10-30
 
 - Manual GitHub update checks from About and the tray menu, with in-app download and restart.
