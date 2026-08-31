@@ -1,11 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.1.3 — 2026-10-31
 
+- Nonblocking update checks on startup, enabled by default with a persistent About opt-out; no-update results and startup errors stay quiet.
+- User-initiated Download and install shows byte/percentage and verification/restart progress in the existing window.
+
+- CPU-rasterized settings background retained in a DIB, with invalid-region GDI presentation and no continuous redraw loop.
+- Unchanged frames and control text are reused; hidden/minimized windows skip presentation, and DPI changes batch font/bounds updates before repainting.
+- Reopening unchanged settings avoids rebuilding keyboard tables and combo-box contents.
+- Shortcut recording saves as soon as the keys are released, without waiting for the polling timer.
+- Opt-in release-profile diagnostics measure UI callbacks, frame reuse, and idle repaint counts without global input or clipboard changes.
 - Standalone EXE assets use `MagicLanguageSwitcher-vVERSION.exe`; architecture suffixes are reserved for releases with multiple executable architecture variants.
 - Release packaging, uploads, and generated SHA-256 entries use the same filename.
 - The updated release reader accepts standalone, explicit x64, and historical asset names while rejecting x86 and ARM64 variants.
-- README download links retain the published v0.1.2 filename and explain the one-time manual upgrade required for its older updater.
+- README links use the new v0.1.3 filename and explain the one-time manual upgrade required for v0.1.2.
 
 ## 0.1.2 — 2026-10-30
 

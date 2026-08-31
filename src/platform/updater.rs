@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command},
     ptr::null,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -73,11 +73,61 @@ fn transaction(target: &Path) -> Result<Transaction, String> {
 }
 
 pub fn check(cancel: &AtomicBool) -> Result<Option<Update>, String> {
+    #[cfg(feature = "desktop-tests")]
+    if let Some(fixture) = std::env::var_os("MAGIC_LANGUAGE_SWITCHER_UPDATE_FIXTURE") {
+        if let Some(counter) = std::env::var_os("MAGIC_LANGUAGE_SWITCHER_UPDATE_REQUEST") {
+            fs::write(counter, b"checked").map_err(|e| e.to_string())?;
+        }
+        let json = fs::read(fixture).map_err(|e| e.to_string())?;
+        return updates::find_update(&json, Version::parse(env!("CARGO_PKG_VERSION"))?);
+    }
     let json = http::bytes(updates::LATEST_API, 1024 * 1024, cancel)?;
     updates::find_update(&json, Version::parse(env!("CARGO_PKG_VERSION"))?)
 }
 
-pub fn install(update: &Update, cancel: &AtomicBool) -> Result<(), String> {
+#[derive(Default)]
+pub struct Progress {
+    bytes: AtomicU64,
+    total: AtomicU64,
+    stage: AtomicU8,
+}
+impl Progress {
+    pub fn text(&self) -> String {
+        match self.stage.load(Ordering::Acquire) {
+            1 => {
+                let total = self.total.load(Ordering::Relaxed);
+                let bytes = self.bytes.load(Ordering::Relaxed).min(total);
+                format!(
+                    "Downloading update: {}% ({:.2}/{:.2} MB)",
+                    bytes.saturating_mul(100) / total.max(1),
+                    bytes as f64 / 1048576.0,
+                    total as f64 / 1048576.0
+                )
+            }
+            2 => "Verifying downloaded update...".into(),
+            3 => "Preparing update and restart...".into(),
+            _ => "Connecting to GitHub...".into(),
+        }
+    }
+}
+struct Download<'a> {
+    file: &'a mut File,
+    progress: &'a Progress,
+}
+impl Write for Download<'_> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let count = self.file.write(buffer)?;
+        self.progress
+            .bytes
+            .fetch_add(count as u64, Ordering::Relaxed);
+        Ok(count)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+pub fn install(update: &Update, cancel: &AtomicBool, progress: &Progress) -> Result<(), String> {
     let target = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(|e| e.to_string())?;
@@ -90,10 +140,22 @@ pub fn install(update: &Update, cancel: &AtomicBool) -> Result<(), String> {
         .create_new(true)
         .open(&staged)
         .map_err(|e| e.to_string())?;
-    let size = http::download(&update.url, update.size, &mut file, cancel)?;
+    progress.total.store(update.size, Ordering::Relaxed);
+    progress.stage.store(1, Ordering::Release);
+    let size = http::download(
+        &update.url,
+        update.size,
+        &mut Download {
+            file: &mut file,
+            progress,
+        },
+        cancel,
+    )?;
+    progress.stage.store(2, Ordering::Release);
     file.sync_all().map_err(|e| e.to_string())?;
     drop(file);
     verify_payload(&staged, size, update)?;
+    progress.stage.store(3, Ordering::Release);
     let plan = Plan {
         pid: std::process::id(),
         original_hash: updates::hash_file(&target)?,
@@ -494,6 +556,21 @@ pub fn smoke(executable: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn download_progress_reports_bytes_percentage_and_verification() {
+        let progress = Progress::default();
+        assert!(progress.text().contains("Connecting"));
+        progress.total.store(100, Ordering::Relaxed);
+        progress.bytes.store(25, Ordering::Relaxed);
+        progress.stage.store(1, Ordering::Release);
+        assert!(progress.text().contains("25%"));
+        progress.bytes.store(150, Ordering::Relaxed);
+        assert!(progress.text().contains("100%"));
+        progress.stage.store(2, Ordering::Release);
+        assert!(progress.text().contains("Verifying"));
+        progress.stage.store(3, Ordering::Release);
+        assert!(progress.text().contains("restart"));
+    }
     #[test]
     fn rejects_tampered_truncated_and_non_executable_downloads() {
         let path = std::env::temp_dir().join(format!(

@@ -8,7 +8,7 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 `ghbdtn vbh` → `привет мир` is one example. Conversion uses the keyboard layouts installed in Windows, rather than a hardcoded English/Russian pair.
 
-**[Download Windows x64 — v0.1.2](https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v0.1.2/MagicLanguageSwitcher-v0.1.2-windows-x64.exe)** · [Release notes](https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v0.1.2) · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
+**[Download Windows x64 — v0.1.3](https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v0.1.3/MagicLanguageSwitcher-v0.1.3.exe)** · [Release notes](https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v0.1.3) · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
 
 ![Magic Language Switcher settings with installed keyboard layouts, two editable shortcuts, and a conversion preview](assets/settings.png)
 
@@ -24,7 +24,7 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 ## Get started
 
-1. Download the EXE from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest). The published v0.1.2 file is `MagicLanguageSwitcher-v0.1.2-windows-x64.exe`; future single-architecture releases use `MagicLanguageSwitcher-vVERSION.exe`.
+1. Download the EXE from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest). The v0.1.3 file is **`MagicLanguageSwitcher-v0.1.3.exe`**, a Windows x64 build.
 2. Put it in a folder you want to keep and run it. No installer, .NET, browser engine, or VC++ redistributable is needed.
 3. Select mistyped text, or leave the caret after a mistyped word, and press **F8**. The same key handles both cases.
 
@@ -67,21 +67,21 @@ This is physical-key conversion, not translation or transliteration. **IME candi
 - **Start with Windows** adds this EXE to your own user's startup entries. Keep the EXE in its final folder before enabling it; disable the option before moving or deleting it.
 - Layout choices and shortcuts are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
 - Run with `--background` to start directly in the tray.
-- **About** contains the version, project link, update check, and an expandable MIT license.
+- **About** contains the installed version, project link, manual update check, startup-check toggle, and an expandable MIT license.
 
 ## Updates
 
-Open **About → Check for updates**, or choose **Check for updates** from the tray menu. The app checks the latest stable release on this GitHub repository. When a newer Windows x64 release is available, choose **Update and restart**.
+Open **About → Check for updates**, or choose **Check for updates** from the tray menu. The app checks the latest stable release on this GitHub repository. When a newer Windows x64 release is available, choose **Download and install**. The existing settings window shows download percentage, transferred size, verification, and restart progress.
 
 The download runs in the background over HTTPS. Before installing, the app checks the file size, Windows x64 header, and SHA-256 against both GitHub release metadata and `SHA256SUMS.txt`. Failed checks leave the current EXE in place. Once verified, a temporary copy of the current app waits for shutdown, replaces the EXE with a backup, and starts the new version. Settings, startup entries, and the existing EXE path are retained, including its filename. Temporary update files are removed after restart.
 
-Keep the EXE in a folder your Windows user can write to. The updater does not request administrator access. Checks and downloads require an internet connection; errors and GitHub rate limits are shown in the app. The published **v0.1.2** checks only on request and has no startup check or background polling.
+Keep the EXE in a folder your Windows user can write to. The updater does not request administrator access. Checks and downloads require an internet connection; errors and GitHub rate limits are shown in the app. **Check for updates on startup** is enabled by default and can be disabled in About. Startup checks run in the background; no-update results and transient errors show no dialog. A newer release produces a tray notification. Disabling the option prevents startup requests while keeping manual checking available. Downloads and installation always require your action.
 
-**Filename transition:** v0.1.2 recognizes only the historical `-windows-x64.exe` asset name. When the next release adopts the shorter name, v0.1.2 users must download that release manually once, quit the old app, and replace the EXE at its existing path to keep startup shortcuts working. Settings are stored separately and are retained. The updated release reader in this repository accepts both naming conventions. Versions before v0.1.2 also require a manual download to gain the updater.
+**Filename transition:** v0.1.2 recognizes only the historical `-windows-x64.exe` asset name. To upgrade from v0.1.2 to v0.1.3, download the new EXE manually once, quit the old app, and replace the EXE at its existing path to keep startup shortcuts working. Settings are stored separately and are retained. v0.1.3 accepts both naming conventions for future updates. Versions before v0.1.2 also require a manual download to gain the updater.
 
 ## Privacy and compatibility
 
-Text correction works offline. In the published v0.1.2, the app contacts GitHub only when you request an update check or download; typed text is never sent. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
+Text correction works offline. The app contacts GitHub for the startup check when enabled and when you request a manual check or download; typed text is never sent. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
 
 Correction temporarily uses the clipboard to read selected text; multiline text is pasted back as plain text. Clipboard payload formats, including images and rich text, are duplicated and restored, and a newer clipboard value is not overwritten. Owner-specific OLE transport handles are excluded; their advertised data formats are preserved. Windows clipboard history or clipboard managers may retain the temporary text. Unusual app-owned clipboard formats can prevent a correction if they cannot be preserved.
 
@@ -105,10 +105,10 @@ Package the executable with the release naming convention:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1
 ```
 
-This builds a Windows x64 EXE, checks its PE imports, and writes `MagicLanguageSwitcher-vVERSION.exe` and `SHA256SUMS.txt` to `artifacts\vVERSION\`, using the Cargo package version. The checksum file names the exact packaged EXE. For a source package with version 0.1.2:
+This builds a Windows x64 EXE, checks its PE imports, and writes `MagicLanguageSwitcher-vVERSION.exe` and `SHA256SUMS.txt` to `artifacts\vVERSION\`, using the Cargo package version. The checksum file names the exact packaged EXE. For a source package with version 0.1.3:
 
 ```powershell
-Get-FileHash .\artifacts\v0.1.2\MagicLanguageSwitcher-v0.1.2.exe -Algorithm SHA256
+Get-FileHash .\artifacts\v0.1.3\MagicLanguageSwitcher-v0.1.3.exe -Algorithm SHA256
 ```
 
 ## Tests
@@ -118,6 +118,14 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
+
+### CPU rendering and responsiveness
+
+The current source renders the settings background on the CPU into a retained 32-bit bitmap. GDI copies only the invalid rectangle to the window; controls and ClearType text stay native to Windows. The application does not create an OpenGL, Direct3D, or Vulkan rendering context. Windows desktop composition remains an operating-system responsibility.
+
+There is no continuous render loop. An unchanged background reuses its pixels; size, DPI, or scene changes rebuild them. Hidden and minimized windows skip presentation. Reopening settings reuses keyboard mappings while the installed layout IDs are unchanged, and unchanged control text is not sent for redraw. DPI changes update bounds and fonts before scheduling a single complete repaint.
+
+For the opt-in release-build latency and repaint profile, see [UI performance checks](docs/ui-performance.md). It reports callback timing, CPU raster/upload counts, and visible/hidden idle paints without injecting global input or changing your clipboard.
 
 Pure conversion and release-validation tests also run on Linux. An isolated Windows integration test replaces a temporary EXE and verifies restart and cleanup without touching the installed app. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
 
@@ -151,7 +159,7 @@ The Windows mappings use [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/
 
 ## Releases and contributions
 
-**Future release filenames:** `MagicLanguageSwitcher-vVERSION.exe` when the release provides one executable architecture. Add `-x64`, `-x86`, or `-arm64` only when the same release provides multiple executable architectures; checksum files, source archives, and documentation do not count as variants. Windows x64 remains the current build target. Already published release assets and their links keep their original names.
+**Release filenames:** `MagicLanguageSwitcher-vVERSION.exe` when the release provides one executable architecture. Add `-x64`, `-x86`, or `-arm64` only when the same release provides multiple executable architectures; checksum files, source archives, and documentation do not count as variants. Windows x64 remains the current build target. Already published release assets and their links keep their original names.
 
 CI checks formatting, Clippy, and tests on Windows and Linux. Bump the stable Cargo package version, add its release notes, and push to `main`; **Publish version** publishes the version only if it is not already public. The release job validates the source, builds the EXE, inspects DLL imports, creates checksums, and uploads assets to a draft before publishing. Version tags remain supported for manual releases. Source publication uses the connected GitHub plugin; the existing release workflow builds and uploads the binary assets. See [CONTRIBUTING.md](CONTRIBUTING.md) for naming, screenshots, update behavior, and release-description requirements.
 

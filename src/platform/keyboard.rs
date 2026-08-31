@@ -13,9 +13,26 @@ use windows_sys::Win32::{
 };
 
 pub fn installed() -> Catalog {
+    #[cfg(feature = "desktop-tests")]
+    let _timing = super::diagnostics::Scope::new("keyboard_tables");
     // Enumeration runs on a fresh thread with no pending dead-key composition. Flag 4
     // keeps ToUnicodeEx from modifying the thread's keyboard state.
     std::thread::spawn(enumerate).join().unwrap_or_default()
+}
+
+/// A cheap identity snapshot; mapping tables only need rebuilding when this changes.
+pub fn installed_ids() -> Vec<u32> {
+    // SAFETY: Windows writes at most the explicitly allocated handle count.
+    unsafe {
+        let count = GetKeyboardLayoutList(0, null_mut());
+        let mut handles = vec![null_mut(); count.max(0) as usize];
+        let actual = GetKeyboardLayoutList(count, handles.as_mut_ptr());
+        handles.truncate(actual.max(0) as usize);
+        handles
+            .into_iter()
+            .map(|handle| handle as usize as u32)
+            .collect()
+    }
 }
 
 fn enumerate() -> Catalog {

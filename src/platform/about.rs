@@ -7,12 +7,21 @@ use windows_sys::Win32::{
 
 const REPOSITORY: &str = "https://github.com/siarheisinelnikau/magic-language-switcher";
 
-pub fn show(parent: HWND, icon: HICON) -> bool {
+pub struct Choice {
+    pub check: bool,
+    pub startup_checks: bool,
+}
+pub fn show(
+    parent: HWND,
+    icon: HICON,
+    startup_checks: bool,
+    update_status: &str,
+) -> Option<Choice> {
     let title = wide("About Magic Language Switcher");
     let heading = wide("Magic Language Switcher");
     let content = wide(&format!(
-        "Version {}\n\nFix text typed in the wrong keyboard layout.\nWorks with the keyboard layouts installed in Windows.\n\nBuilt with Rust. One portable EXE.",
-        env!("CARGO_PKG_VERSION")
+        "Version {}\n\nFix text typed in the wrong keyboard layout.\nWorks with the keyboard layouts installed in Windows.\n\n{update_status}\n\nBuilt with Rust. One portable EXE.",
+        env!("CARGO_PKG_VERSION"),
     ));
     let footer = wide(&format!(
         "<a href=\"{REPOSITORY}\">GitHub repository</a>\nCopyright © 2026 siarheisinelnikau"
@@ -21,6 +30,7 @@ pub fn show(parent: HWND, icon: HICON) -> bool {
     let expand = wide("MIT license");
     let collapse = wide("Hide license");
     let check = wide("Check for updates");
+    let verification = wide("Check for updates on startup");
     let button = TASKDIALOG_BUTTON {
         nButtonID: 100,
         pszButtonText: check.as_ptr(),
@@ -31,13 +41,19 @@ pub fn show(parent: HWND, icon: HICON) -> bool {
         dwFlags: TDF_ENABLE_HYPERLINKS
             | TDF_ALLOW_DIALOG_CANCELLATION
             | TDF_USE_HICON_MAIN
-            | TDF_SIZE_TO_CONTENT,
+            | TDF_SIZE_TO_CONTENT
+            | if startup_checks {
+                TDF_VERIFICATION_FLAG_CHECKED
+            } else {
+                0
+            },
         dwCommonButtons: TDCBF_CLOSE_BUTTON,
         cButtons: 1,
         pButtons: &button,
         pszWindowTitle: title.as_ptr(),
         pszMainInstruction: heading.as_ptr(),
         pszContent: content.as_ptr(),
+        pszVerificationText: verification.as_ptr(),
         Anonymous1: TASKDIALOGCONFIG_0 { hMainIcon: icon },
         pszFooter: footer.as_ptr(),
         pszExpandedInformation: license.as_ptr(),
@@ -48,9 +64,10 @@ pub fn show(parent: HWND, icon: HICON) -> bool {
         ..Default::default()
     };
     let mut selected = 0;
+    let mut checked = i32::from(startup_checks);
     // SAFETY: all text buffers outlive the synchronous dialog; the icon remains app-owned.
     let status =
-        unsafe { TaskDialogIndirect(&configuration, &mut selected, null_mut(), null_mut()) };
+        unsafe { TaskDialogIndirect(&configuration, &mut selected, null_mut(), &mut checked) };
     if status < 0 {
         // SAFETY: the fallback also uses live, NUL-terminated buffers.
         unsafe {
@@ -61,8 +78,12 @@ pub fn show(parent: HWND, icon: HICON) -> bool {
                 MB_OK | MB_ICONINFORMATION,
             );
         }
+        return None;
     }
-    selected == 100
+    Some(Choice {
+        check: selected == 100,
+        startup_checks: checked != 0,
+    })
 }
 
 pub fn offer_update(parent: HWND, update: &crate::updates::Update) -> bool {
@@ -73,7 +94,7 @@ pub fn offer_update(parent: HWND, update: &crate::updates::Update) -> bool {
         env!("CARGO_PKG_VERSION"),
         update.size as f64 / 1048576.0
     ));
-    let label = wide("Update and restart");
+    let label = wide("Download and install");
     let button = TASKDIALOG_BUTTON {
         nButtonID: 100,
         pszButtonText: label.as_ptr(),
