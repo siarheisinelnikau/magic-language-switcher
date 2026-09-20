@@ -189,11 +189,11 @@ pub fn startup_checks(binary: &Path) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
             let json=match mode {
                 "error"=>"invalid JSON".into(),
-                "available"=>serde_json::json!({"tag_name":"v99.0.0","draft":false,"prerelease":false,"assets":[
-                    {"name":"MagicLanguageSwitcher-v99.0.0.exe","browser_download_url":"https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v99.0.0/MagicLanguageSwitcher-v99.0.0.exe","size":100,"state":"uploaded","digest":format!("sha256:{}","ab".repeat(32))},
+                "available"=>serde_json::json!({"tag_name":"v99.0.0","html_url":"https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v99.0.0","draft":false,"prerelease":false,"assets":[
+                    {"name":"MagicLanguageSwitcher-v99.0.0.exe","browser_download_url":"https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v99.0.0/MagicLanguageSwitcher-v99.0.0.exe","size":4096,"state":"uploaded","digest":format!("sha256:{}","ab".repeat(32))},
                     {"name":"SHA256SUMS.txt","browser_download_url":"https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v99.0.0/SHA256SUMS.txt","size":100,"state":"uploaded","digest":null}
                 ]}).to_string(),
-                _=>serde_json::json!({"tag_name":format!("v{}",env!("CARGO_PKG_VERSION")),"draft":false,"prerelease":false,"assets":[]}).to_string(),
+                _=>serde_json::json!({"tag_name":format!("v{}",env!("CARGO_PKG_VERSION")),"html_url":format!("https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v{}",env!("CARGO_PKG_VERSION")),"draft":false,"prerelease":false,"assets":[]}).to_string(),
             };
             fs::write(&response, json).map_err(|e| e.to_string())?;
             let _ = fs::remove_file(&request);

@@ -92,7 +92,7 @@ pub fn offer_update(parent: HWND, update: &crate::updates::Update) -> bool {
     let content = wide(&format!(
         "Installed: {}\nDownload: {:.1} MB\n\nDownload from GitHub, verify SHA-256, and restart the app. Your settings and EXE location will be kept.",
         env!("CARGO_PKG_VERSION"),
-        update.size as f64 / 1048576.0
+        update.executable_size() as f64 / 1048576.0
     ));
     let label = wide("Download and install");
     let button = TASKDIALOG_BUTTON {

@@ -89,7 +89,7 @@ Use an editable field that supports normal selection and copy/paste. Selection d
 
 ## Build from source
 
-On Windows, install the [Rust MSVC toolchain](https://www.rust-lang.org/tools/install), Visual Studio C++ Build Tools, and the Windows SDK. Rust **1.88 or newer** is required; current stable Rust is recommended.
+On Windows, install the [Rust MSVC toolchain](https://www.rust-lang.org/tools/install), Visual Studio C++ Build Tools, and the Windows SDK. Rust **1.95 or newer** is required; current stable Rust is recommended. Keep `rust-auto-updator` beside this repository: Cargo uses `../rust-auto-updator/crates/rust-auto-updator` for the shared update engine. Standalone checkouts and CI runners must provision that sibling workspace first; it is currently a local dependency rather than a published registry package.
 
 ```powershell
 git clone https://github.com/siarheisinelnikau/magic-language-switcher.git
@@ -125,15 +125,17 @@ The current source renders the settings background on the CPU into a retained 32
 
 There is no continuous render loop. An unchanged background reuses its pixels; size, DPI, or scene changes rebuild them. Hidden and minimized windows skip presentation. Reopening settings reuses keyboard mappings while the installed layout IDs are unchanged, and unchanged control text is not sent for redraw. DPI changes update bounds and fonts before scheduling a single complete repaint.
 
+The executable embeds native 16, 20, 24, 32, 48, 64, 128, and 256-pixel app icons. The window assigns a separate small icon, and the dynamic language tray icon is drawn at the system's current small-icon metric instead of shrinking a fixed 32-pixel image. `tools/verify-icons.ps1 -Executable target/release/magic-language-switcher.exe -Output target/icon-proof.png` checks and renders the final EXE resources without launching the app. This proof does not certify actual OS tray appearance or mixed-monitor interaction.
+
+![Native final-executable application icons drawn on light and dark backgrounds](assets/icon-resources.png)
+
 For the opt-in release-build latency and repaint profile, see [UI performance checks](docs/ui-performance.md). It reports callback timing, CPU raster/upload counts, and visible/hidden idle paints without injecting global input or changing your clipboard.
 
-Pure conversion and release-validation tests also run on Linux. An isolated Windows integration test replaces a temporary EXE and verifies restart and cleanup without touching the installed app. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
+Pure conversion tests also run on Linux. The shared updater workspace owns version comparison, repository-bound release validation, integrity checks, and replacement regressions. An isolated Windows integration test replaces a temporary EXE and verifies restart and cleanup without touching the installed app. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
 
 ```powershell
 cargo test --locked --features desktop-tests --test desktop -- --ignored --test-threads=1 --nocapture
 cargo test --locked --all-features failed_persistence -- --ignored --test-threads=1
-# Optional real GitHub HTTPS / checksum test (downloads a release into memory):
-cargo test --locked --all-features github_release_download -- --ignored --nocapture
 ```
 
 ## Project structure
@@ -149,9 +151,9 @@ cargo test --locked --all-features github_release_download -- --ignored --nocapt
 | `src/platform/clipboard.rs` | Clipboard snapshots and restoration |
 | `src/platform/ui.rs` | Native settings window, hotkeys, and tray language icon |
 | `src/platform/about.rs` | Native About and update dialogs with embedded license |
-| `src/updates.rs` | Stable version comparison and GitHub release validation |
-| `src/platform/http.rs` | Bounded HTTPS downloads through Windows WinHTTP |
-| `src/platform/updater.rs` | Verified EXE replacement, backup, restart, and cleanup |
+| `src/updates.rs` | Product identity and compatible release filename policy |
+| `src/platform/updater.rs` | Native UI adapter and narrow cleanup compatibility for older releases |
+| `../rust-auto-updator/crates/rust-auto-updator` | Shared HTTPS, version comparison, release validation, integrity checks, replacement, restart, and cleanup |
 | `src/platform/smoke.rs` | Opt-in desktop integration checks |
 | `tools/` | Portable EXE validation and release packaging |
 

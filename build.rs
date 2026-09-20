@@ -32,12 +32,28 @@ fn main() {
 
 // A code-native icon: two white arrows on a blue rounded square, embedded in the EXE.
 fn make_icon() -> Vec<u8> {
-    let size = 64u32;
+    let sizes = [16u32, 20, 24, 32, 48, 64, 128, 256];
+    let images: Vec<_> = sizes.iter().map(|&size| make_icon_image(size)).collect();
+    let mut result = vec![0, 0, 1, 0, sizes.len() as u8, 0];
+    let mut offset = 6 + 16 * sizes.len() as u32;
+    for (&size, image) in sizes.iter().zip(&images) {
+        result.extend_from_slice(&[size as u8, size as u8, 0, 0, 1, 0, 32, 0]);
+        result.extend_from_slice(&(image.len() as u32).to_le_bytes());
+        result.extend_from_slice(&offset.to_le_bytes());
+        offset += image.len() as u32;
+    }
+    for image in images {
+        result.extend(image);
+    }
+    result
+}
+
+fn make_icon_image(size: u32) -> Vec<u8> {
     let mut pixels = Vec::new();
     for y in (0..size).rev() {
         for x in 0..size {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
+            let px = (x as f32 + 0.5) * 64.0 / size as f32;
+            let py = (y as f32 + 0.5) * 64.0 / size as f32;
             let corner =
                 ((px - px.clamp(12.0, 52.0)).powi(2) + (py - py.clamp(12.0, 52.0)).powi(2)).sqrt();
             let alpha = ((10.5 - corner).clamp(0.0, 1.0) * 255.0) as u8;
@@ -50,7 +66,7 @@ fn make_icon() -> Vec<u8> {
                 (24., 50., 16., 42.),
             ]
             .iter()
-            .any(|&(ax, ay, bx, by)| segment_distance(px, py, ax, ay, bx, by) < 2.0);
+            .any(|&(ax, ay, bx, by)| segment_distance(px, py, ax, ay, bx, by) < 2.8);
             let pixel = if arrow {
                 [255, 255, 255, alpha]
             } else {
@@ -59,11 +75,8 @@ fn make_icon() -> Vec<u8> {
             pixels.extend_from_slice(&pixel);
         }
     }
-    let mask = vec![0u8; (size * size / 8) as usize];
-    let bytes = 40 + pixels.len() + mask.len();
-    let mut result = vec![0, 0, 1, 0, 1, 0, size as u8, size as u8, 0, 0, 1, 0, 32, 0];
-    result.extend_from_slice(&(bytes as u32).to_le_bytes());
-    result.extend_from_slice(&22u32.to_le_bytes());
+    let mask = vec![0u8; (size.div_ceil(32) * 4 * size) as usize];
+    let mut result = Vec::new();
     for value in [40, size, size * 2] {
         result.extend_from_slice(&value.to_le_bytes());
     }

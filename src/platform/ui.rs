@@ -1447,6 +1447,13 @@ unsafe extern "system" fn window_proc(
 }
 
 fn language_icon(language: &str, enabled: bool) -> HICON {
+    // The tray may use 16, 20, 24, or 32 physical pixels according to system DPI.
+    // SAFETY: reading this system metric has no pointer arguments or side effects.
+    let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16);
+    language_icon_at_size(language, enabled, size)
+}
+
+fn language_icon_at_size(language: &str, enabled: bool, size: i32) -> HICON {
     // SAFETY: all GDI handles are local; selected objects are restored before deletion.
     // CreateIconIndirect copies the two bitmaps, so no bitmap escapes this function.
     unsafe {
@@ -1455,7 +1462,7 @@ fn language_icon(language: &str, enabled: bool) -> HICON {
             return null_mut();
         }
         let dc = CreateCompatibleDC(screen);
-        let color = CreateCompatibleBitmap(screen, 32, 32);
+        let color = CreateCompatibleBitmap(screen, size, size);
         ReleaseDC(null_mut(), screen);
         if dc.is_null() || color.is_null() {
             if !dc.is_null() {
@@ -1474,14 +1481,14 @@ fn language_icon(language: &str, enabled: bool) -> HICON {
             &RECT {
                 left: 0,
                 top: 0,
-                right: 32,
-                bottom: 32,
+                right: size,
+                bottom: size,
             },
             brush,
         );
         DeleteObject(brush);
         let font = CreateFontW(
-            -21,
+            -(size * 21 / 32),
             0,
             0,
             0,
@@ -1502,8 +1509,8 @@ fn language_icon(language: &str, enabled: bool) -> HICON {
         let mut rect = RECT {
             left: 0,
             top: 0,
-            right: 32,
-            bottom: 32,
+            right: size,
+            bottom: size,
         };
         DrawTextW(
             dc,
@@ -1516,7 +1523,8 @@ fn language_icon(language: &str, enabled: bool) -> HICON {
         SelectObject(dc, old_bitmap);
         DeleteObject(font);
         DeleteDC(dc);
-        let mask = CreateBitmap(32, 32, 1, 1, [0u8; 128].as_ptr() as *const _);
+        let mask_bits = vec![0u8; ((size + 15) / 16 * 2 * size) as usize];
+        let mask = CreateBitmap(size, size, 1, 1, mask_bits.as_ptr().cast());
         let info = ICONINFO {
             fIcon: 1,
             hbmColor: color,
@@ -1665,6 +1673,12 @@ pub fn run() -> Result<(), String> {
         if window.is_null() {
             return Err("Could not create the application window.".into());
         }
+        let mut small_icon = null_mut();
+        if LoadIconMetric(instance, resource_id, LIM_SMALL, &mut small_icon) < 0 {
+            DestroyWindow(window);
+            return Err("Could not load the small application icon.".into());
+        }
+        SendMessageW(window, WM_SETICON, ICON_SMALL as usize, small_icon as isize);
         {
             let mut state = app.borrow_mut();
             state.window = window;
@@ -1692,6 +1706,67 @@ pub fn run() -> Result<(), String> {
             }
         }
         drop(app);
+        DestroyIcon(small_icon);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod icon_tests {
+    use super::*;
+
+    #[test]
+    fn native_tray_icons_keep_text_at_each_supported_small_icon_size() {
+        // SAFETY: draw through the production GDI path into local memory bitmaps;
+        // all icons, copied bitmaps and DCs are released before the next iteration.
+        unsafe {
+            for size in [16, 20, 24, 32] {
+                for enabled in [false, true] {
+                    let icon = language_icon_at_size("EN", enabled, size);
+                    assert!(!icon.is_null());
+                    let mut info = ICONINFO::default();
+                    assert_ne!(GetIconInfo(icon, &mut info), 0);
+                    let mut bitmap = BITMAP::default();
+                    assert_ne!(
+                        GetObjectW(
+                            info.hbmColor,
+                            size_of::<BITMAP>() as i32,
+                            (&mut bitmap as *mut BITMAP).cast()
+                        ),
+                        0
+                    );
+                    assert_eq!((bitmap.bmWidth, bitmap.bmHeight), (size, size));
+                    let dc = CreateCompatibleDC(null_mut());
+                    let mut pixels = vec![0u32; (size * size) as usize];
+                    let mut header = BITMAPINFO::default();
+                    header.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
+                    header.bmiHeader.biWidth = size;
+                    header.bmiHeader.biHeight = -size;
+                    header.bmiHeader.biPlanes = 1;
+                    header.bmiHeader.biBitCount = 32;
+                    assert_eq!(
+                        GetDIBits(
+                            dc,
+                            info.hbmColor,
+                            0,
+                            size as u32,
+                            pixels.as_mut_ptr().cast(),
+                            &mut header,
+                            DIB_RGB_COLORS
+                        ),
+                        size
+                    );
+                    assert!(
+                        pixels.iter().any(|pixel| pixel & 0x00ffffff == 0x00ffffff),
+                        "Tray language text disappeared at {size}px"
+                    );
+                    assert!(pixels.iter().any(|pixel| pixel & 0x00ffffff != 0x00ffffff));
+                    DeleteDC(dc);
+                    DeleteObject(info.hbmColor);
+                    DeleteObject(info.hbmMask);
+                    DestroyIcon(icon);
+                }
+            }
+        }
     }
 }

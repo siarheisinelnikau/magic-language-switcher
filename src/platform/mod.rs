@@ -2,7 +2,6 @@ mod about;
 mod clipboard;
 mod correction;
 mod hotkeys;
-mod http;
 mod keyboard;
 mod native;
 mod selection;
