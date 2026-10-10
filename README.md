@@ -131,6 +131,10 @@ The executable embeds native 16, 20, 24, 32, 48, 64, 128, and 256-pixel app icon
 
 For the opt-in release-build latency and repaint profile, see [UI performance checks](docs/ui-performance.md). It reports callback timing, CPU raster/upload counts, and visible/hidden idle paints without injecting global input or changing your clipboard.
 
+For a finite app-owned idle check, run `target/release/magic-language-switcher.exe --diagnose-render target/render-diagnostic.json`. It uses a separate window/mutex and fixture preferences, registers no tray, hotkeys or hooks, starts no correction/update worker, changes no autostart or saved settings, and injects no input. Its own timer measures visible, hidden, minimized and restored windows for five seconds each after one second of settling, then saves the report and exits. Excessive CPU or raster activity ends it early. Production GDI painting and the real window message loop remain active.
+
+The [2026-11-01 optimized diagnostic](docs/diagnostics/render-idle-2026-11-01.json) observed zero root paints, CPU rasterizations, GDI presents and native-control color callbacks in every settled sample. Process CPU was 0% of one core at `GetProcessTimes` resolution. Startup/restore produced one rasterization and two presents across the complete run, proving the renderer was exercised. This measures isolated UI idle behavior; background features, injected interaction, GPU timing and real tray clicks are outside its scope.
+
 Pure conversion tests also run on Linux. The shared updater workspace owns version comparison, repository-bound release validation, integrity checks, and replacement regressions. An isolated Windows integration test replaces a temporary EXE and verifies restart and cleanup without touching the installed app. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
 
 ```powershell

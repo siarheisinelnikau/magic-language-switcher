@@ -4,6 +4,7 @@ mod correction;
 mod hotkeys;
 mod keyboard;
 mod native;
+mod render_diagnostic;
 mod selection;
 mod settings;
 mod surface;

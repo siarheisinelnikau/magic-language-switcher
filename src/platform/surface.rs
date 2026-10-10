@@ -77,6 +77,7 @@ impl Surface {
         }
     }
     pub fn present(&self, target: HDC, dirty: windows_sys::Win32::Foundation::RECT) -> bool {
+        super::render_diagnostic::count("present");
         // SAFETY: both DCs remain live; BeginPaint clips the target to its update region.
         unsafe {
             BitBlt(

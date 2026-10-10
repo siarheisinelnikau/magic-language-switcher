@@ -8,6 +8,7 @@ fn main() {
         if std::env::args().any(|argument| {
             argument == "--apply-update"
                 || argument == "--test-updater"
+                || argument == "--diagnose-render"
                 || argument.starts_with("--updater-smoke-")
         }) {
             eprintln!("Update failed: {error}");

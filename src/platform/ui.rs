@@ -96,6 +96,7 @@ struct UpdateJob {
 }
 
 struct App {
+    diagnostic: Option<super::render_diagnostic::Diagnostic>,
     window: HWND,
     tray_icon: HICON,
     icon: HICON,
@@ -135,9 +136,19 @@ struct App {
 }
 
 impl App {
-    fn new(instance: HINSTANCE, icon: HICON, scale: f32) -> Self {
-        let preferences = settings::load();
+    fn new(
+        instance: HINSTANCE,
+        icon: HICON,
+        scale: f32,
+        diagnostic: Option<super::render_diagnostic::Diagnostic>,
+    ) -> Self {
+        let preferences = if diagnostic.is_some() {
+            settings::Preferences::default()
+        } else {
+            settings::load()
+        };
         Self {
+            diagnostic,
             window: null_mut(),
             tray_icon: null_mut(),
             instance,
@@ -401,6 +412,15 @@ impl App {
             INK,
             BG,
         );
+        if self.diagnostic.is_some() {
+            self.startup_update_checks = false;
+            self.update_preview();
+            // SAFETY: the diagnostic timer belongs only to this isolated app window.
+            unsafe {
+                SetTimer(self.window, 1, 150, None);
+            }
+            return Ok(());
+        }
         // SAFETY: the checkbox and root were created on this thread; hotkeys belong to root.
         unsafe {
             SendMessageW(
@@ -788,6 +808,9 @@ impl App {
         self.refresh_status();
     }
     fn command(&mut self, id: usize, notification: u32) {
+        if self.diagnostic.is_some() {
+            return;
+        }
         if (SHORTCUT_FIRST_ID..SHORTCUT_FIRST_ID + 2).contains(&id) {
             self.cancel_capture();
             self.begin_capture(id - SHORTCUT_FIRST_ID);
@@ -912,6 +935,15 @@ impl App {
         }
     }
     fn tick(&mut self) {
+        if let Some(diagnostic) = &mut self.diagnostic {
+            if diagnostic.tick(self.window) {
+                // SAFETY: the finite diagnostic owns this window and has no unsaved data.
+                unsafe {
+                    DestroyWindow(self.window);
+                }
+            }
+            return;
+        }
         #[cfg(feature = "desktop-tests")]
         let _timing = super::diagnostics::Scope::new("timer");
         self.finish_capture_if_released();
@@ -1126,6 +1158,7 @@ impl App {
             if GetUpdateRect(self.window, null_mut(), 0) == 0 {
                 return;
             }
+            super::render_diagnostic::count("paint");
             #[cfg(feature = "desktop-tests")]
             let _timing = super::diagnostics::Scope::new("paint");
             let mut paint = PAINTSTRUCT::default();
@@ -1154,6 +1187,9 @@ impl App {
             #[cfg(feature = "desktop-tests")]
             let raster_started = std::time::Instant::now();
             let prepared = self.frame.prepare(width, height, self.scale, scene);
+            if prepared == Some(true) {
+                super::render_diagnostic::count("raster");
+            }
             if prepared.is_some() {
                 let mut upload = prepared == Some(true);
                 if !self
@@ -1190,6 +1226,7 @@ impl App {
         }
     }
     fn color_control(&mut self, dc: HDC, child: HWND) -> LRESULT {
+        super::render_diagnostic::count("native");
         let colors = self
             .widgets
             .iter()
@@ -1592,13 +1629,23 @@ pub fn show_error(error: &str) {
 }
 
 pub fn run() -> Result<(), String> {
-    if updater::command_mode()? {
+    let diagnostic = super::render_diagnostic::Diagnostic::from_args()?;
+    let isolated = diagnostic.is_some();
+    if !isolated && updater::command_mode()? {
         return Ok(());
     }
     // SAFETY: the window classes use static function pointers, App remains boxed until every
     // window is destroyed, and the message loop dispatches only initialized MSG values.
     unsafe {
-        let mutex = CreateMutexW(null(), 0, wide("Local\\MagicLanguageSwitcher").as_ptr());
+        let mutex_name = if isolated {
+            format!(
+                "Local\\MagicLanguageSwitcher.Diagnostic.{}",
+                std::process::id()
+            )
+        } else {
+            "Local\\MagicLanguageSwitcher".into()
+        };
+        let mutex = CreateMutexW(null(), 0, wide(&mutex_name).as_ptr());
         if mutex.is_null() {
             return Err("Could not create the application instance lock.".into());
         }
@@ -1630,7 +1677,11 @@ pub fn run() -> Result<(), String> {
         // Win32 integer resource IDs intentionally occupy the low 16 bits of a pointer.
         let resource_id = std::ptr::without_provenance::<u16>(1);
         let icon = LoadImageW(instance, resource_id, IMAGE_ICON, 0, 0, LR_DEFAULTSIZE) as HICON;
-        let root_class = wide(WINDOW_CLASS);
+        let root_class = wide(if isolated {
+            "MagicLanguageSwitcher.RenderDiagnostic"
+        } else {
+            WINDOW_CLASS
+        });
         let root = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
@@ -1646,7 +1697,7 @@ pub fn run() -> Result<(), String> {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut RECT as *mut _, 0);
         let scale = (GetDpiForSystem() as f32 / 96.0)
             .min(((area.bottom - area.top - 64) as f32 / 487.0).max(0.75));
-        let app = Box::new(RefCell::new(App::new(instance, icon, scale)));
+        let app = Box::new(RefCell::new(App::new(instance, icon, scale, diagnostic)));
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
         let mut bounds = RECT {
             right: (464.0 * scale) as i32,
@@ -1657,7 +1708,11 @@ pub fn run() -> Result<(), String> {
         let width = bounds.right - bounds.left;
         let height = bounds.bottom - bounds.top;
         let window = CreateWindowExW(
-            0,
+            if isolated {
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+            } else {
+                0
+            },
             root_class.as_ptr(),
             wide("Magic Language Switcher").as_ptr(),
             style,
@@ -1685,7 +1740,10 @@ pub fn run() -> Result<(), String> {
             state.initialize()?;
         }
         if !std::env::args().any(|arg| arg == "--background") {
-            ShowWindow(window, SW_SHOW);
+            ShowWindow(window, if isolated { SW_SHOWNOACTIVATE } else { SW_SHOW });
+        }
+        if let Some(diagnostic) = &mut app.borrow_mut().diagnostic {
+            diagnostic.begin();
         }
         let mut message = MSG::default();
         loop {
