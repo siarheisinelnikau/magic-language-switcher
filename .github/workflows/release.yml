@@ -58,7 +58,7 @@ jobs:
         run: |
           $tag = $env:RELEASE_TAG
           $directory = "artifacts/$tag"
-          $executable = "$directory/MagicLanguageSwitcher-$tag-windows-x64.exe"
+          $executable = "$directory/MagicLanguageSwitcher-$tag.exe"
           $existing = gh release view $tag --json isDraft 2>$null
           $releaseExists = $LASTEXITCODE -eq 0
           if ($releaseExists -and -not ($existing | ConvertFrom-Json).isDraft) {

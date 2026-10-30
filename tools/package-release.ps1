@@ -19,7 +19,7 @@ try {
     }
     $outputDirectory = Join-Path $repositoryDirectory "artifacts/v$Version"
     New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-    $filename = "MagicLanguageSwitcher-v$Version-windows-x64.exe"
+    $filename = "MagicLanguageSwitcher-v$Version.exe"
     $executable = Join-Path $outputDirectory $filename
     Copy-Item -LiteralPath 'target/x86_64-pc-windows-msvc/release/magic-language-switcher.exe' -Destination $executable -Force
     python tools/verify-portable.py $executable

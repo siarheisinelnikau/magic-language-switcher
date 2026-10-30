@@ -8,13 +8,23 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 `ghbdtn vbh` → `привет мир` is one example. Conversion uses the keyboard layouts installed in Windows, rather than a hardcoded English/Russian pair.
 
-**[Download the latest release](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest)** · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
+**[Download Windows x64 — v0.1.2](https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v0.1.2/MagicLanguageSwitcher-v0.1.2-windows-x64.exe)** · [Release notes](https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v0.1.2) · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
 
-![Compact settings with layout selection and correction shortcuts](assets/settings.png)
+![Magic Language Switcher settings with installed keyboard layouts, two editable shortcuts, and a conversion preview](assets/settings.png)
+
+*The application settings window: choose layouts, customize correction and undo, and try a conversion without leaving the app.*
+
+## What it does
+
+- **One correction shortcut:** convert the selection, or the last word when nothing is selected.
+- **Separate undo:** restore the last correction while the text and caret still match.
+- **Installed Windows layouts:** select any supported direct-key layout pair, including variants and AltGr mappings.
+- **Compact native UI:** editable shortcuts, a live preview, optional Windows startup, and an active-language tray icon.
+- **Portable Rust app:** one EXE with in-app GitHub update checks, verified downloads, and restart.
 
 ## Get started
 
-1. Download `MagicLanguageSwitcher-v0.1.2-windows-x64.exe` from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest).
+1. Download the EXE from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest). The published v0.1.2 file is `MagicLanguageSwitcher-v0.1.2-windows-x64.exe`; future single-architecture releases use `MagicLanguageSwitcher-vVERSION.exe`.
 2. Put it in a folder you want to keep and run it. No installer, .NET, browser engine, or VC++ redistributable is needed.
 3. Select mistyped text, or leave the caret after a mistyped word, and press **F8**. The same key handles both cases.
 
@@ -65,11 +75,13 @@ Open **About → Check for updates**, or choose **Check for updates** from the t
 
 The download runs in the background over HTTPS. Before installing, the app checks the file size, Windows x64 header, and SHA-256 against both GitHub release metadata and `SHA256SUMS.txt`. Failed checks leave the current EXE in place. Once verified, a temporary copy of the current app waits for shutdown, replaces the EXE with a backup, and starts the new version. Settings, startup entries, and the existing EXE path are retained, including its filename. Temporary update files are removed after restart.
 
-Keep the EXE in a folder your Windows user can write to. The updater does not request administrator access. Checks and downloads require an internet connection; errors and GitHub rate limits are shown in the app. There are no automatic update checks or background polling. Versions before 0.1.2 need a manual download once to gain the updater.
+Keep the EXE in a folder your Windows user can write to. The updater does not request administrator access. Checks and downloads require an internet connection; errors and GitHub rate limits are shown in the app. The published **v0.1.2** checks only on request and has no startup check or background polling.
+
+**Filename transition:** v0.1.2 recognizes only the historical `-windows-x64.exe` asset name. When the next release adopts the shorter name, v0.1.2 users must download that release manually once, quit the old app, and replace the EXE at its existing path to keep startup shortcuts working. Settings are stored separately and are retained. The updated release reader in this repository accepts both naming conventions. Versions before v0.1.2 also require a manual download to gain the updater.
 
 ## Privacy and compatibility
 
-Text correction works offline. The app contacts GitHub only when you request an update check or download; typed text is never sent. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
+Text correction works offline. In the published v0.1.2, the app contacts GitHub only when you request an update check or download; typed text is never sent. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
 
 Correction temporarily uses the clipboard to read selected text; multiline text is pasted back as plain text. Clipboard payload formats, including images and rich text, are duplicated and restored, and a newer clipboard value is not overwritten. Owner-specific OLE transport handles are excluded; their advertised data formats are preserved. Windows clipboard history or clipboard managers may retain the temporary text. Unusual app-owned clipboard formats can prevent a correction if they cannot be preserved.
 
@@ -87,16 +99,16 @@ cargo build --release --locked
 
 The executable is `target\release\magic-language-switcher.exe`. The MSVC runtime is linked statically through `.cargo/config.toml`; the icon, manifest, version information, and license are embedded. Only Windows system DLLs are required.
 
-Create the same release assets used on GitHub:
+Package the executable with the release naming convention:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1
 ```
 
-This builds a Windows x64 EXE, checks its PE imports, and writes the EXE and `SHA256SUMS.txt` to `artifacts\v0.1.2\`. To compare a downloaded file's checksum:
+This builds a Windows x64 EXE, checks its PE imports, and writes `MagicLanguageSwitcher-vVERSION.exe` and `SHA256SUMS.txt` to `artifacts\vVERSION\`, using the Cargo package version. The checksum file names the exact packaged EXE. For a source package with version 0.1.2:
 
 ```powershell
-Get-FileHash .\MagicLanguageSwitcher-v0.1.2-windows-x64.exe -Algorithm SHA256
+Get-FileHash .\artifacts\v0.1.2\MagicLanguageSwitcher-v0.1.2.exe -Algorithm SHA256
 ```
 
 ## Tests
@@ -139,7 +151,9 @@ The Windows mappings use [`MapVirtualKeyExW`](https://learn.microsoft.com/en-us/
 
 ## Releases and contributions
 
-CI checks formatting, Clippy, and tests on Windows and Linux. Bump the stable Cargo package version, add its release notes, and push to `main`; **Publish version** publishes the version only if it is not already public. The release job validates the source, builds the EXE, inspects DLL imports, creates checksums, and uploads assets to a draft before publishing. Version tags remain supported for manual releases. See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Future release filenames:** `MagicLanguageSwitcher-vVERSION.exe` when the release provides one executable architecture. Add `-x64`, `-x86`, or `-arm64` only when the same release provides multiple executable architectures; checksum files, source archives, and documentation do not count as variants. Windows x64 remains the current build target. Already published release assets and their links keep their original names.
+
+CI checks formatting, Clippy, and tests on Windows and Linux. Bump the stable Cargo package version, add its release notes, and push to `main`; **Publish version** publishes the version only if it is not already public. The release job validates the source, builds the EXE, inspects DLL imports, creates checksums, and uploads assets to a draft before publishing. Version tags remain supported for manual releases. Source publication uses the connected GitHub plugin; the existing release workflow builds and uploads the binary assets. See [CONTRIBUTING.md](CONTRIBUTING.md) for naming, screenshots, update behavior, and release-description requirements.
 
 Inspired by the one-key layout correction workflow of [Mahou](https://github.com/Sippelin/Mahou3). This is an independent implementation.
 

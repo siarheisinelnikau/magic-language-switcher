@@ -87,12 +87,23 @@ pub fn find_update(json: &[u8], current: Version) -> Result<Option<Update>, Stri
     if version <= current {
         return Ok(None);
     }
-    let filename = format!("MagicLanguageSwitcher-v{version}-windows-x64.exe");
-    let asset = release
-        .assets
+    // Prefer the standalone filename; accept an explicit x64 variant and historical
+    // names so development builds can still read already published releases.
+    let filenames = [
+        format!("MagicLanguageSwitcher-v{version}.exe"),
+        format!("MagicLanguageSwitcher-v{version}-x64.exe"),
+        format!("MagicLanguageSwitcher-v{version}-windows-x64.exe"),
+    ];
+    let asset = filenames
         .iter()
-        .find(|asset| asset.name == filename && asset.state == "uploaded")
+        .find_map(|filename| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name == *filename && asset.state == "uploaded")
+        })
         .ok_or("This release has no compatible Windows x64 EXE yet.")?;
+    let filename = asset.name.clone();
     let checksum = release
         .assets
         .iter()
@@ -159,7 +170,7 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
     fn release(version: &str) -> Vec<u8> {
-        let filename = format!("MagicLanguageSwitcher-{version}-windows-x64.exe");
+        let filename = format!("MagicLanguageSwitcher-{version}.exe");
         serde_json::to_vec(&serde_json::json!({"tag_name":version,"draft":false,"prerelease":false,"assets":[
             {"name":filename,"browser_download_url":format!("https://github.com/{REPOSITORY}/releases/download/{version}/{filename}"),"size":400000,"digest":format!("sha256:{}", "ab".repeat(32)),"state":"uploaded"},
             {"name":"SHA256SUMS.txt","browser_download_url":format!("https://github.com/{REPOSITORY}/releases/download/{version}/SHA256SUMS.txt"),"size":111,"digest":null,"state":"uploaded"}
@@ -213,6 +224,53 @@ mod tests {
                 "{change}"
             );
         }
+    }
+    #[test]
+    fn supports_standalone_x64_and_historical_names_without_selecting_other_architectures() {
+        for suffix in ["", "-x64", "-windows-x64", "-x86", "-arm64"] {
+            let mut json: serde_json::Value = serde_json::from_slice(&release("v0.1.3")).unwrap();
+            let name = format!("MagicLanguageSwitcher-v0.1.3{suffix}.exe");
+            json["assets"][0]["name"] = name.clone().into();
+            json["assets"][0]["browser_download_url"] =
+                format!("https://github.com/{REPOSITORY}/releases/download/v0.1.3/{name}").into();
+            let result = find_update(&serde_json::to_vec(&json).unwrap(), Version(0, 1, 2));
+            if matches!(suffix, "-x86" | "-arm64") {
+                assert!(result.is_err(), "{suffix}");
+            } else {
+                assert_eq!(result.unwrap().unwrap().filename, name);
+            }
+        }
+    }
+
+    #[test]
+    fn prefers_the_standalone_asset_and_checks_its_exact_checksum_name() {
+        let mut json: serde_json::Value = serde_json::from_slice(&release("v0.1.3")).unwrap();
+        let mut legacy = json["assets"][0].clone();
+        legacy["name"] = "MagicLanguageSwitcher-v0.1.3-windows-x64.exe".into();
+        legacy["browser_download_url"] = format!("https://github.com/{REPOSITORY}/releases/download/v0.1.3/MagicLanguageSwitcher-v0.1.3-windows-x64.exe").into();
+        json["assets"].as_array_mut().unwrap().insert(0, legacy);
+        let update = find_update(&serde_json::to_vec(&json).unwrap(), Version(0, 1, 2))
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.filename, "MagicLanguageSwitcher-v0.1.3.exe");
+        assert!(
+            verify_checksum_file(
+                format!("{}  {}\n", update.sha256, update.filename).as_bytes(),
+                &update
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_checksum_file(
+                format!(
+                    "{}  MagicLanguageSwitcher-v0.1.3-windows-x64.exe\n",
+                    update.sha256
+                )
+                .as_bytes(),
+                &update
+            )
+            .is_err()
+        );
     }
     #[test]
     fn validates_checksum_for_the_exact_asset() {
