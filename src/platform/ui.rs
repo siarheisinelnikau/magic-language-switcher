@@ -1,3 +1,4 @@
+use super::hotkeys::{CAPTURE_MESSAGE, CaptureHook, Registry};
 use super::{
     about,
     correction::{Action, Engine},
@@ -5,7 +6,10 @@ use super::{
     native::{Target, wide},
     settings,
 };
-use crate::layout::{Catalog, Selection};
+use crate::{
+    layout::{Catalog, Selection},
+    shortcuts::{Shortcut, Shortcuts},
+};
 use std::{
     cell::RefCell,
     mem::size_of,
@@ -32,6 +36,7 @@ const OUTPUT_ID: usize = 105;
 const ABOUT_ID: usize = 106;
 const FROM_ID: usize = 109;
 const TO_ID: usize = 110;
+const SHORTCUT_FIRST_ID: usize = 120;
 const OPEN_ID: usize = 201;
 const TRAY_PAUSE_ID: usize = 202;
 const BG: u32 = rgb(246, 248, 252);
@@ -59,6 +64,15 @@ struct Request {
     catalog: Arc<Catalog>,
 }
 
+#[derive(Clone, Copy)]
+struct Capture {
+    index: usize,
+    pending: Option<Shortcut>,
+    release_key: u16,
+    released: bool,
+    held_modifiers: u16,
+}
+
 struct App {
     window: HWND,
     tray_icon: HICON,
@@ -80,7 +94,10 @@ struct App {
     busy: bool,
     exit_requested: bool,
     conflicts: Vec<String>,
-    registered: Vec<i32>,
+    registrations: Option<Registry>,
+    shortcuts: Shortcuts,
+    capture: Option<Capture>,
+    capture_hook: Option<CaptureHook>,
     tray_added: bool,
     taskbar_message: u32,
     last_language: String,
@@ -91,6 +108,7 @@ struct App {
 
 impl App {
     fn new(instance: HINSTANCE, icon: HICON, scale: f32) -> Self {
+        let preferences = settings::load();
         Self {
             window: null_mut(),
             tray_icon: null_mut(),
@@ -105,14 +123,17 @@ impl App {
             input: null_mut(),
             from: null_mut(),
             to: null_mut(),
-            selection: settings::load_selection(),
+            selection: preferences.selection,
             catalog: Arc::new(keyboard::installed()),
             output: null_mut(),
             enabled: true,
             busy: false,
             exit_requested: false,
             conflicts: Vec::new(),
-            registered: Vec::new(),
+            registrations: None,
+            shortcuts: preferences.shortcuts,
+            capture: None,
+            capture_hook: None,
             tray_added: false,
             taskbar_message: 0,
             last_language: String::new(),
@@ -278,18 +299,21 @@ impl App {
             WHITE,
         );
         self.populate_layouts();
-        for (y, title, keys) in [
-            (222, "Fix last word", "F8"),
-            (261, "Fix selected text", "Shift + F8"),
-            (300, "Undo last fix", "Ctrl + F8"),
-        ] {
-            self.label(title, [24, y + 5, 270, 25], 0, INK, BG);
+        for (index, (y, title)) in [
+            (222, "Fix last word"),
+            (261, "Fix selected text"),
+            (300, "Undo last fix"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            self.label(title, [24, y + 5, 204, 25], 0, INK, BG);
             self.widget(
-                "STATIC",
-                keys,
-                [318, y, 122, 30],
-                0,
-                SS_CENTER | SS_CENTERIMAGE | SS_NOPREFIX,
+                "BUTTON",
+                &self.shortcuts.0[index].to_string(),
+                [242, y, 198, 30],
+                SHORTCUT_FIRST_ID + index,
+                WS_TABSTOP | BS_PUSHBUTTON as u32,
                 1,
                 INK,
                 PALE,
@@ -319,7 +343,7 @@ impl App {
         self.label("→", [222, 390, 28, 28], 3, BLUE, WHITE);
         self.subtitle = self.widget(
             "STATIC",
-            "Current language is shown in the system tray.",
+            "Click a shortcut to change it.",
             [24, 446, 416, 20],
             107,
             SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS,
@@ -356,20 +380,12 @@ impl App {
                 0,
             );
             self.taskbar_message = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
-            for (action, modifiers, name) in [
-                (1, 0, "F8"),
-                (2, MOD_SHIFT, "Shift+F8"),
-                (3, MOD_CONTROL, "Ctrl+F8"),
-            ] {
-                if RegisterHotKey(self.window, action, modifiers | MOD_NOREPEAT, VK_F8 as u32) != 0
-                {
-                    self.registered.push(action);
-                } else {
-                    self.conflicts.push(name.into());
-                }
-            }
             SetTimer(self.window, 1, 150, None);
         }
+        let mut registrations = Registry::new(self.window);
+        registrations.resume(self.shortcuts);
+        self.registrations = Some(registrations);
+        self.refresh_status();
         let (sender, work) = mpsc::channel::<Request>();
         let (result, results) = mpsc::channel();
         let owner = self.window as usize;
@@ -409,7 +425,7 @@ impl App {
                 self.subtitle,
                 &format!("Already in use: {}", self.conflicts.join(", ")),
             );
-            self.notify(&format!("Already in use: {}. Close the other shortcut app and restart Magic Language Switcher.", self.conflicts.join(", ")));
+            self.notify(&format!("Already in use: {}. Click the unavailable shortcut in settings to choose another combination.", self.conflicts.join(", ")));
         }
         Ok(())
     }
@@ -533,14 +549,7 @@ impl App {
     }
     fn toggle_pause(&mut self) {
         self.enabled = !self.enabled;
-        self.set_text(
-            self.status,
-            if self.enabled {
-                "●  Ready"
-            } else {
-                "●  Paused"
-            },
-        );
+        self.refresh_status();
         // SAFETY: PAUSE_ID is a child button created in initialize.
         self.set_text(
             unsafe { GetDlgItem(self.window, PAUSE_ID as i32) },
@@ -549,7 +558,174 @@ impl App {
         self.last_language.clear();
         self.refresh_tray_language();
     }
+    fn refresh_status(&mut self) {
+        self.conflicts = self
+            .registrations
+            .as_ref()
+            .map_or_else(Vec::new, |registry| registry.conflicts(self.shortcuts));
+        let status = if self.capture.is_some() {
+            "●  Set shortcut"
+        } else if !self.enabled {
+            "●  Paused"
+        } else if !self.conflicts.is_empty() {
+            "●  Shortcut conflict"
+        } else {
+            "●  Ready"
+        };
+        self.set_text(self.status, status);
+    }
+    fn shortcut_button(&self, index: usize) -> HWND {
+        // SAFETY: shortcut indexes are validated before querying our three child controls.
+        unsafe { GetDlgItem(self.window, (SHORTCUT_FIRST_ID + index) as i32) }
+    }
+    fn show_shortcuts(&self) {
+        for (index, shortcut) in self.shortcuts.0.iter().enumerate() {
+            self.set_text(self.shortcut_button(index), &shortcut.to_string());
+        }
+    }
+    fn begin_capture(&mut self, index: usize) {
+        if self.busy {
+            self.set_text(self.subtitle, "Wait for the current correction to finish.");
+            return;
+        }
+        if let Some(registry) = &mut self.registrations {
+            registry.suspend();
+        }
+        match CaptureHook::start(self.window) {
+            Ok(hook) => self.capture_hook = Some(hook),
+            Err(error) => {
+                if let Some(registry) = &mut self.registrations {
+                    registry.resume(self.shortcuts);
+                }
+                self.refresh_status();
+                self.set_text(self.subtitle, &error);
+                return;
+            }
+        }
+        self.capture = Some(Capture {
+            index,
+            pending: None,
+            release_key: 0,
+            released: false,
+            held_modifiers: 0,
+        });
+        self.set_text(self.shortcut_button(index), "Press keys...");
+        self.set_text(self.subtitle, "Press keys · Esc cancels · Backspace resets");
+        self.refresh_status();
+        // SAFETY: this button is owned by the UI thread and remains live during capture.
+        unsafe {
+            SetFocus(self.shortcut_button(index));
+        }
+    }
+    fn cancel_capture(&mut self) {
+        if self.capture.take().is_none() {
+            return;
+        }
+        self.capture_hook.take();
+        if let Some(registry) = &mut self.registrations {
+            registry.resume(self.shortcuts);
+        }
+        self.show_shortcuts();
+        self.refresh_status();
+        self.set_text(self.subtitle, "Shortcut change cancelled.");
+    }
+    fn capture_key(&mut self, key: u16, modifiers: u16, up: bool) {
+        let Some(mut capture) = self.capture else {
+            return;
+        };
+        capture.held_modifiers = modifiers;
+        if up {
+            if key == capture.release_key {
+                capture.released = true;
+            }
+            self.capture = Some(capture);
+            self.finish_capture_if_released();
+            return;
+        }
+        if capture.pending.is_some() {
+            return;
+        }
+        if key == VK_ESCAPE || key == VK_TAB && modifiers == 0 {
+            self.cancel_capture();
+            return;
+        }
+        if matches!(
+            key,
+            VK_SHIFT
+                | VK_CONTROL
+                | VK_MENU
+                | VK_LSHIFT
+                | VK_RSHIFT
+                | VK_LCONTROL
+                | VK_RCONTROL
+                | VK_LMENU
+                | VK_RMENU
+        ) {
+            self.capture = Some(capture);
+            return;
+        }
+        let shortcut = if key == VK_BACK && modifiers == 0 {
+            Shortcuts::default().0[capture.index]
+        } else {
+            Shortcut { key, modifiers }
+        };
+        if let Err(error) = shortcut.validate() {
+            self.set_text(self.subtitle, error);
+            self.capture = Some(capture);
+            return;
+        }
+        self.capture = Some(Capture {
+            pending: Some(shortcut),
+            release_key: key,
+            released: false,
+            ..capture
+        });
+        self.set_text(self.shortcut_button(capture.index), &shortcut.to_string());
+        self.set_text(self.subtitle, "Release the keys to save this shortcut.");
+    }
+    fn finish_capture_if_released(&mut self) {
+        let Some(capture) = self.capture else {
+            return;
+        };
+        let Some(shortcut) = capture.pending else {
+            return;
+        };
+        if !capture.released || capture.held_modifiers != 0 {
+            return;
+        }
+        self.capture = None;
+        self.capture_hook.take();
+        let selection = self.selection;
+        let result = self
+            .registrations
+            .as_mut()
+            .ok_or_else(|| "Shortcut registration is unavailable.".to_owned())
+            .and_then(|registry| {
+                registry.update(self.shortcuts, capture.index, shortcut, |shortcuts| {
+                    settings::save(settings::Preferences {
+                        selection,
+                        shortcuts,
+                    })
+                })
+            });
+        match result {
+            Ok(shortcuts) => {
+                self.shortcuts = shortcuts;
+                self.set_text(self.subtitle, &format!("Shortcut saved: {shortcut}"));
+            }
+            Err(error) => self.set_text(self.subtitle, &format!("{error} Previous shortcut kept.")),
+        }
+        self.show_shortcuts();
+        self.refresh_status();
+    }
     fn command(&mut self, id: usize, notification: u32) {
+        if (SHORTCUT_FIRST_ID..SHORTCUT_FIRST_ID + 3).contains(&id) {
+            self.cancel_capture();
+            self.begin_capture(id - SHORTCUT_FIRST_ID);
+            return;
+        }
+        self.cancel_capture();
+
         match id {
             PAUSE_ID | TRAY_PAUSE_ID => self.toggle_pause(),
             OPEN_ID => self.open(),
@@ -594,7 +770,10 @@ impl App {
                     from: self.selected_layout(self.from),
                     to: self.selected_layout(self.to),
                 };
-                if let Err(error) = settings::save_selection(self.selection) {
+                if let Err(error) = settings::save(settings::Preferences {
+                    selection: self.selection,
+                    shortcuts: self.shortcuts,
+                }) {
                     self.notify(&error);
                 }
                 self.update_preview();
@@ -604,7 +783,7 @@ impl App {
         }
     }
     fn hotkey(&mut self, id: usize) {
-        if !self.enabled || self.busy {
+        if !self.enabled || self.busy || self.capture.is_some() {
             return;
         }
         let action = match id {
@@ -633,6 +812,8 @@ impl App {
         }
     }
     fn tick(&mut self) {
+        self.finish_capture_if_released();
+
         if let Some(result) = self
             .results
             .as_ref()
@@ -640,7 +821,14 @@ impl App {
         {
             self.busy = false;
             match result {
-                Ok(message) => self.set_text(self.subtitle, &message),
+                Ok(message) => {
+                    let message = if message == "Text corrected." {
+                        format!("{message} {} undoes the last fix.", self.shortcuts.0[2])
+                    } else {
+                        message
+                    };
+                    self.set_text(self.subtitle, &message);
+                }
                 Err(error) => {
                     self.set_text(self.subtitle, &error);
                     self.notify(&error);
@@ -800,15 +988,14 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.capture_hook.take();
         self.work.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
         // SAFETY: all handles were created by this app. The message loop has ended.
         unsafe {
-            for id in &self.registered {
-                UnregisterHotKey(self.window, *id);
-            }
+            self.registrations.take();
             if self.tray_added {
                 Shell_NotifyIconW(NIM_DELETE, &self.tray_data());
             }
@@ -867,6 +1054,10 @@ unsafe extern "system" fn window_proc(
                     app.command(wparam & 0xffff, (wparam >> 16) as u32);
                     return 0;
                 }
+                CAPTURE_MESSAGE => {
+                    app.capture_key(wparam as u16, (lparam & 0xff) as u16, lparam & 0x100 != 0);
+                    return 0;
+                }
                 WM_HOTKEY => {
                     app.hotkey(wparam);
                     return 0;
@@ -876,8 +1067,12 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
                 WM_CLOSE => {
+                    app.cancel_capture();
                     ShowWindow(window, SW_HIDE);
                     return 0;
+                }
+                WM_ACTIVATE if wparam & 0xffff == WA_INACTIVE as usize => {
+                    app.cancel_capture();
                 }
                 WM_DPICHANGED => {
                     app.dpi_changed(wparam as u32 & 0xffff, lparam as *const RECT);
@@ -1140,6 +1335,9 @@ pub fn run() -> Result<(), String> {
                 return Err("The Windows message loop failed.".into());
             }
             let keyboard_message = (WM_KEYFIRST..=WM_KEYLAST).contains(&message.message);
+            if keyboard_message && app.borrow().capture.is_some() {
+                continue;
+            }
             if !keyboard_message || IsDialogMessageW(window, &message) == 0 {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);

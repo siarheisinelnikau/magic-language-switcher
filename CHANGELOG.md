@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 — 2026-10-30
+
+- Editable shortcut buttons in the existing settings rows; window dimensions are unchanged.
+- Persistent custom bindings, with Esc to cancel and Backspace to restore the default.
+- Duplicate and global conflict detection, plus rollback if registration or saving fails.
+- Recording is confined to the selected shortcut field and stops on focus loss.
+- Dynamic undo hints and automatic migration of older layout-only settings.
+- Desktop regression coverage for capture, conflicts, cancellation, resets, and persistence.
+- Version-based release automation for future Cargo version bumps on `main`.
+
 ## 0.1.0 — 2026-10-30
 
 First public release.

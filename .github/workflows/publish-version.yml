@@ -1,0 +1,50 @@
+name: Publish version
+
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml', '.github/workflows/publish-version.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find an unpublished package version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Only stable semantic versions can be published.' >&2
+            exit 1
+          fi
+          printf 'tag=v%s\n' "$version" >> "$GITHUB_OUTPUT"
+          if draft=$(gh release view "v$version" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [[ "$draft" == 'false' ]]; then
+              echo 'publish=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo 'publish=true' >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.version.outputs.tag }}
+      bootstrap: true

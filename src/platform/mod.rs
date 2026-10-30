@@ -1,6 +1,7 @@
 mod about;
 mod clipboard;
 mod correction;
+mod hotkeys;
 mod keyboard;
 mod native;
 mod settings;

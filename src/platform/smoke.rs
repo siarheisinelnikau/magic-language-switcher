@@ -10,7 +10,7 @@ use std::{
     process::{Child, Command},
     ptr::{null, null_mut},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
     Foundation::*,
@@ -94,11 +94,29 @@ pub fn run(binary: &Path) -> Result<(), String> {
         );
         let mut original_clipboard = Session::capture(host as usize)?;
         ShowWindow(host, SW_SHOW);
-        let child = Command::new(binary)
-            .arg("--background")
-            .env("MAGIC_LANGUAGE_SWITCHER_SMOKE", "1")
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        let settings_path = std::env::temp_dir().join(format!(
+            "magic-language-switcher-smoke-{}-{}.conf",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos()
+        ));
+        struct SettingsGuard(std::path::PathBuf);
+        impl Drop for SettingsGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _settings = SettingsGuard(settings_path.clone());
+        let spawn_app = || {
+            Command::new(binary)
+                .arg("--background")
+                .env("MAGIC_LANGUAGE_SWITCHER_SETTINGS", &settings_path)
+                .spawn()
+                .map_err(|error| error.to_string())
+        };
+        let child = spawn_app()?;
         struct ProcessGuard(Child);
         impl Drop for ProcessGuard {
             fn drop(&mut self) {
@@ -119,13 +137,13 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 let _ = self.0.wait();
             }
         }
-        let _process = ProcessGuard(child);
+        let mut process = ProcessGuard(child);
         wait_for(
             || !FindWindowW(wide(WINDOW_CLASS).as_ptr(), null()).is_null(),
             "Application startup",
         )?;
         pump_for(Duration::from_millis(350));
-        let app = FindWindowW(wide(WINDOW_CLASS).as_ptr(), null());
+        let mut app = FindWindowW(wide(WINDOW_CLASS).as_ptr(), null());
         println!(
             "Application status: {} / {}",
             window_text(GetDlgItem(app, 108)),
@@ -273,11 +291,199 @@ pub fn run(binary: &Path) -> Result<(), String> {
                 || IsWindowVisible(app) != 0,
                 "Second instance opens the existing window",
             )?;
+            let mut original_bounds = RECT::default();
+            GetClientRect(app, &mut original_bounds);
+            record_binding(app, 0, VK_F8, &[VK_CONTROL], "F8")?;
+            check(
+                window_text(GetDlgItem(app, 107)).contains("already assigned"),
+                "Duplicate action shortcut is rejected",
+            )?;
+            prepare("ghbdtn")?;
+            trigger(
+                VK_SPACE,
+                "привет",
+                "Previous shortcut survives duplicate rejection",
+            )?;
+            {
+                struct ReservedShortcut(HWND);
+                impl Drop for ReservedShortcut {
+                    fn drop(&mut self) {
+                        // SAFETY: this guard owns the test registration.
+                        unsafe {
+                            UnregisterHotKey(self.0, 88);
+                        }
+                    }
+                }
+                if RegisterHotKey(
+                    host,
+                    88,
+                    MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT,
+                    VK_F23 as u32,
+                ) == 0
+                {
+                    return Err("Could not reserve the test conflict shortcut.".into());
+                }
+                let _reserved = ReservedShortcut(host);
+                record_binding(app, 0, VK_F23, &[VK_CONTROL, VK_MENU, VK_SHIFT], "F8")?;
+                check(
+                    window_text(GetDlgItem(app, 107)).contains("another app"),
+                    "External global shortcut conflict is rejected",
+                )?;
+                prepare("ghbdtn")?;
+                trigger(
+                    VK_SPACE,
+                    "привет",
+                    "Previous shortcut survives external conflict",
+                )?;
+            }
+            record_binding(app, 0, VK_F9, &[VK_CONTROL, VK_SHIFT], "Ctrl+Shift+F9")?;
+            record_binding(app, 1, VK_F19, &[VK_MENU], "Alt+F19")?;
+            record_binding(app, 2, VK_F10, &[VK_CONTROL, VK_SHIFT], "Ctrl+Shift+F10")?;
+            begin_recording(app, 0)?;
+            native::chord(VK_ESCAPE, &[])?;
+            wait_for(
+                || window_text(GetDlgItem(app, 120)) == "Ctrl+Shift+F9",
+                "Escape cancels shortcut capture",
+            )?;
+            begin_recording(app, 1)?;
+            activate(host);
+            SetFocus(editor);
+            wait_for(
+                || window_text(GetDlgItem(app, 121)) == "Alt+F19",
+                "Leaving settings cancels shortcut capture",
+            )?;
+            prepare("ghbdtn")?;
+            shortcut(VK_SPACE)?;
+            pump_for(Duration::from_millis(250));
+            check(
+                window_text(editor) == "ghbdtn",
+                "Old F8 binding is unregistered",
+            )?;
+            native::chord(VK_F9, &[VK_CONTROL, VK_SHIFT])?;
+            wait_for(
+                || window_text(editor) == "привет",
+                "Custom last-word shortcut works",
+            )?;
+            pump_for(Duration::from_millis(500));
+            check(
+                window_text(GetDlgItem(app, 107)).contains("Ctrl+Shift+F10"),
+                "Undo hint uses the configured shortcut",
+            )?;
+            native::chord(VK_F10, &[VK_CONTROL, VK_SHIFT])?;
+            wait_for(
+                || window_text(editor) == "ghbdtn",
+                "Custom undo shortcut works",
+            )?;
+            pump_for(Duration::from_millis(500));
+            prepare("Ghbdtn vbh!")?;
+            SendMessageW(editor, EM_SETSEL, 0, -1);
+            native::chord(VK_F19, &[VK_MENU])?;
+            wait_for(
+                || window_text(editor) == "Привет мир!",
+                "Custom selection shortcut works",
+            )?;
+            pump_for(Duration::from_millis(500));
+            let mut final_bounds = RECT::default();
+            GetClientRect(app, &mut final_bounds);
+            check(
+                original_bounds.right == final_bounds.right
+                    && original_bounds.bottom == final_bounds.bottom,
+                "Shortcut editing does not resize the settings window",
+            )?;
+            PostMessageW(app, WM_COMMAND, QUIT_ID, 0);
+            wait_for(
+                || matches!(process.0.try_wait(), Ok(Some(_))),
+                "Exit before persistence check",
+            )?;
+            process.0 = spawn_app()?;
+            wait_for(
+                || !FindWindowW(wide(WINDOW_CLASS).as_ptr(), null()).is_null(),
+                "Restart with saved shortcuts",
+            )?;
+            app = FindWindowW(wide(WINDOW_CLASS).as_ptr(), null());
+            pump_for(Duration::from_millis(400));
+            check(
+                window_text(GetDlgItem(app, 120)) == "Ctrl+Shift+F9",
+                "Custom shortcut survives app restart",
+            )?;
+            prepare("ghbdtn")?;
+            native::chord(VK_F9, &[VK_CONTROL, VK_SHIFT])?;
+            wait_for(
+                || window_text(editor) == "привет",
+                "Saved global shortcut is registered after restart",
+            )?;
+            pump_for(Duration::from_millis(500));
+            record_binding(app, 0, VK_BACK, &[], "F8")?;
+            prepare("ghbdtn")?;
+            native::chord(VK_F8, &[])?;
+            wait_for(
+                || window_text(editor) == "привет",
+                "Backspace restores the default shortcut",
+            )?;
+            pump_for(Duration::from_millis(500));
             Ok(())
         })();
         let restored = original_clipboard.restore_current();
         result.and(restored)
     }
+}
+
+fn activate(window: HWND) {
+    // SAFETY: temporarily attach input queues only to foreground the known test target.
+    unsafe {
+        let other = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        let current = GetCurrentThreadId();
+        let attached = other != current && AttachThreadInput(current, other, 1) != 0;
+        BringWindowToTop(window);
+        SetForegroundWindow(window);
+        if attached {
+            AttachThreadInput(current, other, 0);
+        }
+    }
+}
+
+fn begin_recording(app: HWND, index: usize) -> Result<(), String> {
+    // SAFETY: these messages open the real settings window and invoke its real shortcut button.
+    unsafe {
+        PostMessageW(app, WM_APP + 2, 0, 0);
+        wait_for(
+            || IsWindowVisible(app) != 0,
+            "Open settings for shortcut editing",
+        )?;
+        activate(app);
+        PostMessageW(app, WM_COMMAND, 120 + index, 0);
+        wait_for(
+            || window_text(GetDlgItem(app, 120 + index as i32)) == "Press keys...",
+            "Shortcut capture started",
+        )
+    }
+}
+
+fn record_binding(
+    app: HWND,
+    index: usize,
+    key: u16,
+    modifiers: &[u16],
+    expected: &str,
+) -> Result<(), String> {
+    begin_recording(app, index)?;
+    native::chord(key, modifiers)?;
+    // SAFETY: shortcut button IDs are fixed and created by this application.
+    let button = unsafe { GetDlgItem(app, 120 + index as i32) };
+    wait_for(
+        || window_text(button) == expected,
+        "Shortcut capture finished",
+    )
+    .map_err(|error| {
+        // SAFETY: this is the existing status label of the known application window.
+        let status = unsafe { window_text(GetDlgItem(app, 107)) };
+        format!(
+            "{error}; button: {:?}; status: {status}",
+            window_text(button)
+        )
+    })?;
+    pump_for(Duration::from_millis(180));
+    Ok(())
 }
 
 fn select_pair(app: HWND, source_language: u16, destination_language: u16) -> Result<(), String> {
