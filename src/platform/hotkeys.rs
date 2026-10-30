@@ -125,14 +125,14 @@ unsafe extern "system" fn record_key(code: i32, message: WPARAM, data: LPARAM) -
 
 pub struct Registry {
     window: usize,
-    active: [bool; 3],
+    active: [bool; 2],
 }
 
 impl Registry {
     pub fn new(window: HWND) -> Self {
         Self {
             window: window as usize,
-            active: [false; 3],
+            active: [false; 2],
         }
     }
     pub fn suspend(&mut self) {
@@ -246,7 +246,7 @@ mod tests {
             );
             assert!(!window.is_null());
             let mut registry = Registry::new(window);
-            let current = Shortcuts([0x83, 0x84, 0x85].map(|key| Shortcut {
+            let current = Shortcuts([0x83, 0x84].map(|key| Shortcut {
                 key,
                 modifiers: CTRL | ALT | SHIFT,
             }));

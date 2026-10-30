@@ -14,9 +14,9 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 ## Get started
 
-1. Download `MagicLanguageSwitcher-v0.1.1-windows-x64.exe` from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest).
+1. Download `MagicLanguageSwitcher-v0.1.2-windows-x64.exe` from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest).
 2. Put it in a folder you want to keep and run it. No installer, .NET, browser engine, or VC++ redistributable is needed.
-3. Leave the caret after a mistyped word and press **F8**, or select some text and press **Shift+F8**.
+3. Select mistyped text, or leave the caret after a mistyped word, and press **F8**. The same key handles both cases.
 
 Requires **Windows 10 version 1607 or newer, or Windows 11, x64**. The release is unsigned.
 
@@ -24,11 +24,12 @@ Requires **Windows 10 version 1607 or newer, or Windows 11, x64**. The release i
 
 | Default shortcut | Action |
 | --- | --- |
-| **F8** | Convert the last word, using the editor's word-selection behavior |
-| **Shift+F8** | Convert the selected text |
+| **F8** | Convert selected text; if nothing is selected, convert the last word |
 | **Ctrl+F8** | Undo the last correction immediately, in the same editor |
 
-**To change a shortcut:** click its button in settings, press the new combination, and release the keys to save. **Esc** cancels; **Backspace** restores that action's default. The buttons replace the previous shortcut labels without increasing the window size.
+**To change a shortcut:** click its button in settings, press the new combination, and release the keys to save. **Esc** cancels; **Backspace** restores that action's default. There are just two actions: **Correct text** and **Undo**.
+
+Existing last-word and undo bindings are retained when upgrading from earlier releases. The separate selection binding is retired. If selected text cannot be copied or converted, the app leaves it selected rather than falling back to a different word.
 
 Use Ctrl, Alt, and/or Shift with a key, function keys (except Windows-reserved F12), or supported toggle keys such as Pause, Caps Lock, and Scroll Lock. Ordinary typing keys need Ctrl or Alt. Windows-key shortcuts are not supported. Avoid Ctrl+Alt combinations that overlap AltGr characters in your keyboard layout.
 
@@ -36,7 +37,7 @@ Each action needs a distinct shortcut. If a combination belongs to another app, 
 
 Undo checks that the text before the caret still matches the last correction. If the text or caret has changed, it refuses to replace anything. A selection can contain up to **4,096 UTF-16 code units**, including line breaks and tabs.
 
-The system tray icon shows the active language. It stays in the tray; nothing follows your mouse or text caret. Click the icon to open settings, or right-click for pause/resume and quit. Closing the settings window keeps the app running in the tray.
+The system tray icon shows the active language. It stays in the tray; nothing follows your mouse or text caret. Click the icon to open settings, or right-click for pause/resume, update checks, and quit. Closing the settings window keeps the app running in the tray.
 
 ## Choose any installed keyboard layout
 
@@ -56,15 +57,23 @@ This is physical-key conversion, not translation or transliteration. **IME candi
 - **Start with Windows** adds this EXE to your own user's startup entries. Keep the EXE in its final folder before enabling it; disable the option before moving or deleting it.
 - Layout choices and shortcuts are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
 - Run with `--background` to start directly in the tray.
-- **About** contains the version, project link, and an expandable MIT license.
+- **About** contains the version, project link, update check, and an expandable MIT license.
+
+## Updates
+
+Open **About → Check for updates**, or choose **Check for updates** from the tray menu. The app checks the latest stable release on this GitHub repository. When a newer Windows x64 release is available, choose **Update and restart**.
+
+The download runs in the background over HTTPS. Before installing, the app checks the file size, Windows x64 header, and SHA-256 against both GitHub release metadata and `SHA256SUMS.txt`. Failed checks leave the current EXE in place. Once verified, a temporary copy of the current app waits for shutdown, replaces the EXE with a backup, and starts the new version. Settings, startup entries, and the existing EXE path are retained, including its filename. Temporary update files are removed after restart.
+
+Keep the EXE in a folder your Windows user can write to. The updater does not request administrator access. Checks and downloads require an internet connection; errors and GitHub rate limits are shown in the app. There are no automatic update checks or background polling. Versions before 0.1.2 need a manual download once to gain the updater.
 
 ## Privacy and compatibility
 
-The app works offline. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
+Text correction works offline. The app contacts GitHub only when you request an update check or download; typed text is never sent. It has no telemetry, network service, continuous keyboard hook, or typing log. A temporary keyboard hook runs only while you explicitly record a shortcut and is removed afterward. The app reads text only when you invoke a correction and keeps one undo record in memory.
 
-Correction temporarily uses the clipboard to read selected text; multiline text is pasted back as plain text. Existing clipboard formats are duplicated and restored, and a newer clipboard value is not overwritten. Windows clipboard history or clipboard managers may retain the temporary text. Unusual app-owned clipboard formats can prevent a correction if they cannot be preserved.
+Correction temporarily uses the clipboard to read selected text; multiline text is pasted back as plain text. Clipboard payload formats, including images and rich text, are duplicated and restored, and a newer clipboard value is not overwritten. Owner-specific OLE transport handles are excluded; their advertised data formats are preserved. Windows clipboard history or clipboard managers may retain the temporary text. Unusual app-owned clipboard formats can prevent a correction if they cannot be preserved.
 
-Use an editable field that supports normal selection and copy/paste. Native password fields are excluded. Read-only controls, games, terminals, custom editors, and apps running as administrator may reject or reinterpret input. Text formatting is not preserved when replacing a rich-text selection. If a global shortcut is already registered by another app, choose a different combination in settings.
+Use an editable field that supports normal selection and copy/paste. Selection detection uses native edit messages and Windows UI Automation, with a clipboard probe when an editor exposes neither. Editors that copy entire lines without exposing their selection state may not support automatic fallback. Password fields exposed by Windows are excluded. Read-only controls, games, terminals, custom editors, and apps running as administrator may reject or reinterpret input. Text formatting is not preserved when replacing a rich-text selection. If a global shortcut is already registered by another app, choose a different combination in settings.
 
 ## Build from source
 
@@ -84,10 +93,10 @@ Create the same release assets used on GitHub:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1
 ```
 
-This builds a Windows x64 EXE, checks its PE imports, and writes the EXE and `SHA256SUMS.txt` to `artifacts\v0.1.1\`. To compare a downloaded file's checksum:
+This builds a Windows x64 EXE, checks its PE imports, and writes the EXE and `SHA256SUMS.txt` to `artifacts\v0.1.2\`. To compare a downloaded file's checksum:
 
 ```powershell
-Get-FileHash .\MagicLanguageSwitcher-v0.1.1-windows-x64.exe -Algorithm SHA256
+Get-FileHash .\MagicLanguageSwitcher-v0.1.2-windows-x64.exe -Algorithm SHA256
 ```
 
 ## Tests
@@ -98,11 +107,13 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 ```
 
-Pure conversion tests also run on Linux. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
+Pure conversion and release-validation tests also run on Linux. An isolated Windows integration test replaces a temporary EXE and verifies restart and cleanup without touching the installed app. The opt-in Windows desktop test starts an isolated native editor and the real app, exercises the actual global shortcuts, and restores the clipboard afterward. It requires an unlocked desktop, installed US English and Russian layouts for its known examples, and no running app instance:
 
 ```powershell
 cargo test --locked --features desktop-tests --test desktop -- --ignored --test-threads=1 --nocapture
 cargo test --locked --all-features failed_persistence -- --ignored --test-threads=1
+# Optional real GitHub HTTPS / checksum test (downloads a release into memory):
+cargo test --locked --all-features github_release_download -- --ignored --nocapture
 ```
 
 ## Project structure
@@ -114,9 +125,13 @@ cargo test --locked --all-features failed_persistence -- --ignored --test-thread
 | `src/platform/hotkeys.rs` | Registration, conflict rollback, and temporary shortcut recording |
 | `src/platform/keyboard.rs` | Installed layout discovery and Windows keyboard tables |
 | `src/platform/correction.rs` | Correction and verified undo |
+| `src/platform/selection.rs` | Native and UI Automation selection detection |
 | `src/platform/clipboard.rs` | Clipboard snapshots and restoration |
 | `src/platform/ui.rs` | Native settings window, hotkeys, and tray language icon |
-| `src/platform/about.rs` | Native About dialog and embedded license |
+| `src/platform/about.rs` | Native About and update dialogs with embedded license |
+| `src/updates.rs` | Stable version comparison and GitHub release validation |
+| `src/platform/http.rs` | Bounded HTTPS downloads through Windows WinHTTP |
+| `src/platform/updater.rs` | Verified EXE replacement, backup, restart, and cleanup |
 | `src/platform/smoke.rs` | Opt-in desktop integration checks |
 | `tools/` | Portable EXE validation and release packaging |
 

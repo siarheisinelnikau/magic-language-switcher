@@ -1,6 +1,7 @@
 use super::{
     clipboard::Session,
     native::{self, Target},
+    selection,
 };
 use crate::layout::{Catalog, Selection};
 use std::{thread, time::Duration};
@@ -8,9 +9,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
-    LastWord = 1,
-    Selection = 2,
-    Undo = 3,
+    Correct = 1,
+    Undo = 2,
 }
 
 struct UndoEntry {
@@ -50,7 +50,7 @@ impl Engine {
         let result = if matches!(action, Action::Undo) {
             self.undo(target, &mut clipboard)
         } else {
-            self.correct(action, target, &mut clipboard, catalog, selection)
+            self.correct(target, &mut clipboard, catalog, selection)
         };
         let restored = clipboard.restore();
         match (result, restored) {
@@ -62,20 +62,33 @@ impl Engine {
 
     fn correct(
         &mut self,
-        action: Action,
         target: Target,
         clipboard: &mut Session,
         catalog: &Catalog,
         selection: Selection,
     ) -> Result<String, String> {
-        let last_word = matches!(action, Action::LastWord);
-        if last_word {
-            native::chord(VK_LEFT, &[VK_CONTROL, VK_SHIFT])?;
-            thread::sleep(Duration::from_millis(35));
-        }
+        let mut last_word = false;
         let mut replaced = false;
         let result = (|| {
-            let original = clipboard.copy_selection()?;
+            let selected = selection::has_selection(target)?;
+            let selected_text = if selected == Some(false) {
+                None
+            } else {
+                clipboard.try_copy_selection()?
+            };
+            if selected == Some(true) && selected_text.is_none() {
+                return Err("Could not copy the selected text. Nothing was changed.".into());
+            }
+            let original = match selected_text {
+                Some(text) => text,
+                None => {
+                    target.ensure_active()?;
+                    native::chord(VK_LEFT, &[VK_CONTROL, VK_SHIFT])?;
+                    last_word = true;
+                    thread::sleep(Duration::from_millis(35));
+                    clipboard.copy_selection()?
+                }
+            };
             target.ensure_active()?;
             if original.is_empty() {
                 return Err("There is no selected text to convert.".into());
