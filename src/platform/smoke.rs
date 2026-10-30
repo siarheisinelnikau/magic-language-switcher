@@ -120,6 +120,8 @@ pub fn run(binary: &Path) -> Result<(), String> {
             }
         }
         let _settings = SettingsGuard(settings_path.clone());
+        std::fs::write(&settings_path, "check_updates_on_startup=false\n")
+            .map_err(|e| e.to_string())?;
         let spawn_app = || {
             Command::new(binary)
                 .arg("--background")

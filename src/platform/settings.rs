@@ -10,10 +10,20 @@ use windows_sys::Win32::{Foundation::*, System::Registry::*};
 const STARTUP_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const STARTUP_NAME: &str = "MagicLanguageSwitcher";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub selection: Selection,
     pub shortcuts: Shortcuts,
+    pub startup_update_checks: bool,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            selection: Selection::default(),
+            shortcuts: Shortcuts::default(),
+            startup_update_checks: true,
+        }
+    }
 }
 
 fn preferences_path() -> Option<PathBuf> {
@@ -41,6 +51,9 @@ fn parse_preferences(text: &str) -> Preferences {
     for line in text.lines() {
         if let Some((name, value)) = line.split_once('=') {
             match name.trim() {
+                "check_updates_on_startup" => {
+                    preferences.startup_update_checks = value.trim() != "false"
+                }
                 "source" => preferences.selection.from = u32::from_str_radix(value.trim(), 16).ok(),
                 "destination" => {
                     preferences.selection.to = u32::from_str_radix(value.trim(), 16).ok()
@@ -68,11 +81,12 @@ fn parse_preferences(text: &str) -> Preferences {
 fn serialize(preferences: Preferences) -> String {
     let value = |id: Option<u32>| id.map_or_else(|| "auto".into(), |id| format!("{id:08X}"));
     format!(
-        "source={}\ndestination={}\nhotkey_correct={}\nhotkey_undo={}\n",
+        "source={}\ndestination={}\nhotkey_correct={}\nhotkey_undo={}\ncheck_updates_on_startup={}\n",
         value(preferences.selection.from),
         value(preferences.selection.to),
         preferences.shortcuts.0[0].encode(),
-        preferences.shortcuts.0[1].encode()
+        preferences.shortcuts.0[1].encode(),
+        preferences.startup_update_checks
     )
 }
 
@@ -183,6 +197,17 @@ pub fn set_startup(enabled: bool) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::shortcuts::{CTRL, SHIFT};
+
+    #[test]
+    fn startup_update_checks_default_on_and_the_opt_out_survives_other_preferences() {
+        assert!(parse_preferences("source=auto").startup_update_checks);
+        let mut preferences =
+            parse_preferences("check_updates_on_startup=false\nhotkey_correct=0002:004B");
+        assert!(!preferences.startup_update_checks);
+        preferences.selection.to = Some(0x419);
+        assert_eq!(parse_preferences(&serialize(preferences)), preferences);
+        assert!(parse_preferences("check_updates_on_startup=invalid").startup_update_checks);
+    }
 
     #[test]
     fn old_layout_settings_keep_default_shortcuts() {

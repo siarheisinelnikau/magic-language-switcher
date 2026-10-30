@@ -4,10 +4,13 @@ use super::{
     correction::{Action, Engine},
     keyboard,
     native::{Target, wide},
-    settings, updater,
+    settings,
+    surface::Surface,
+    updater,
 };
 use crate::{
     layout::{Catalog, Selection},
+    raster::{Card, Frame, Scene},
     shortcuts::{Shortcut, Shortcuts},
 };
 use std::{
@@ -44,6 +47,7 @@ const SHORTCUT_FIRST_ID: usize = 120;
 const OPEN_ID: usize = 201;
 const TRAY_PAUSE_ID: usize = 202;
 const UPDATE_ID: usize = 206;
+const STARTUP_UPDATE_MESSAGE: u32 = WM_APP + 21;
 const BG: u32 = rgb(246, 248, 252);
 const INK: u32 = rgb(29, 43, 66);
 const MUTED: u32 = rgb(99, 112, 131);
@@ -83,6 +87,9 @@ enum UpdateResult {
     Installed(Result<(), String>),
 }
 struct UpdateJob {
+    startup: bool,
+    installing: bool,
+    progress: Arc<updater::Progress>,
     results: mpsc::Receiver<UpdateResult>,
     cancel: Arc<AtomicBool>,
     worker: thread::JoinHandle<()>,
@@ -94,6 +101,8 @@ struct App {
     icon: HICON,
     instance: HINSTANCE,
     scale: f32,
+    frame: Frame,
+    surface: Option<Surface>,
     widgets: Vec<Widget>,
     fonts: Vec<HFONT>,
     brushes: Vec<(u32, HBRUSH)>,
@@ -120,6 +129,9 @@ struct App {
     results: Option<mpsc::Receiver<Result<String, String>>>,
     worker: Option<thread::JoinHandle<()>>,
     update: Option<UpdateJob>,
+    startup_update_checks: bool,
+    available_update: Option<crate::updates::Update>,
+    update_status: String,
 }
 
 impl App {
@@ -131,6 +143,8 @@ impl App {
             instance,
             icon,
             scale,
+            frame: Frame::default(),
+            surface: None,
             widgets: Vec::new(),
             fonts: Vec::new(),
             brushes: Vec::new(),
@@ -157,6 +171,9 @@ impl App {
             results: None,
             worker: None,
             update: None,
+            startup_update_checks: preferences.startup_update_checks,
+            available_update: None,
+            update_status: "No update check yet.".into(),
         }
     }
     fn s(&self, value: i32) -> i32 {
@@ -429,6 +446,12 @@ impl App {
         self.update_preview();
         self.refresh_tray_language();
         self.update_tray(NIM_ADD);
+        if self.startup_update_checks {
+            // SAFETY: defer the background check until the first normal event-loop turn.
+            unsafe {
+                PostMessageW(self.window, STARTUP_UPDATE_MESSAGE, 0, 0);
+            }
+        }
         if !self.tray_added {
             return Err("Windows could not create the system tray icon.".into());
         }
@@ -443,12 +466,17 @@ impl App {
         Ok(())
     }
     fn set_text(&self, handle: HWND, text: &str) {
+        if window_text(handle) == text {
+            return;
+        }
         // SAFETY: the handle refers to one of our live controls; Windows copies the text.
         unsafe {
             SetWindowTextW(handle, wide(text).as_ptr());
         }
     }
     fn update_preview(&self) {
+        #[cfg(feature = "desktop-tests")]
+        let _timing = super::diagnostics::Scope::new("preview");
         let input = window_text(self.input);
         let output = self
             .catalog
@@ -556,16 +584,37 @@ impl App {
         }
     }
     fn open(&mut self) {
-        self.catalog = Arc::new(keyboard::installed());
-        self.populate_layouts();
-        self.update_preview();
+        #[cfg(feature = "desktop-tests")]
+        let _timing = super::diagnostics::Scope::new("open");
+        if !self
+            .catalog
+            .layouts
+            .iter()
+            .map(|layout| layout.id)
+            .eq(keyboard::installed_ids())
+        {
+            self.catalog = Arc::new(keyboard::installed());
+            self.populate_layouts();
+            self.update_preview();
+        }
         // SAFETY: root remains live for the application's message loop.
         unsafe {
-            ShowWindow(self.window, SW_RESTORE);
+            #[cfg(feature = "desktop-tests")]
+            if std::env::var_os("MAGIC_LANGUAGE_SWITCHER_UI_NO_ACTIVATE").is_some() {
+                if IsWindowVisible(self.window) == 0 || IsIconic(self.window) != 0 {
+                    ShowWindow(self.window, SW_SHOWNOACTIVATE);
+                }
+                return;
+            }
+            if IsWindowVisible(self.window) == 0 || IsIconic(self.window) != 0 {
+                ShowWindow(self.window, SW_RESTORE);
+            }
             SetForegroundWindow(self.window);
         }
     }
     fn toggle_pause(&mut self) {
+        #[cfg(feature = "desktop-tests")]
+        let _timing = super::diagnostics::Scope::new("pause");
         self.enabled = !self.enabled;
         self.refresh_status();
         // SAFETY: PAUSE_ID is a child button created in initialize.
@@ -714,6 +763,7 @@ impl App {
         self.capture = None;
         self.capture_hook.take();
         let selection = self.selection;
+        let startup_update_checks = self.startup_update_checks;
         let result = self
             .registrations
             .as_mut()
@@ -723,6 +773,7 @@ impl App {
                     settings::save(settings::Preferences {
                         selection,
                         shortcuts,
+                        startup_update_checks,
                     })
                 })
             });
@@ -794,17 +845,41 @@ impl App {
                 if let Err(error) = settings::save(settings::Preferences {
                     selection: self.selection,
                     shortcuts: self.shortcuts,
+                    startup_update_checks: self.startup_update_checks,
                 }) {
                     self.notify(&error);
                 }
                 self.update_preview();
             }
             ABOUT_ID => {
-                if about::show(self.window, self.icon) {
+                if let Some(choice) = about::show(
+                    self.window,
+                    self.icon,
+                    self.startup_update_checks,
+                    &self.update_status,
+                ) {
+                    if choice.startup_checks != self.startup_update_checks {
+                        match settings::save(settings::Preferences {
+                            selection: self.selection,
+                            shortcuts: self.shortcuts,
+                            startup_update_checks: choice.startup_checks,
+                        }) {
+                            Ok(()) => self.startup_update_checks = choice.startup_checks,
+                            Err(error) => about::update_status(self.window, &error, true),
+                        }
+                    }
+                    if choice.check {
+                        self.check_updates();
+                    }
+                }
+            }
+            UPDATE_ID => {
+                if let Some(update) = self.available_update.clone() {
+                    self.offer_update(update);
+                } else {
                     self.check_updates();
                 }
             }
-            UPDATE_ID => self.check_updates(),
             _ => {}
         }
     }
@@ -837,6 +912,8 @@ impl App {
         }
     }
     fn tick(&mut self) {
+        #[cfg(feature = "desktop-tests")]
+        let _timing = super::diagnostics::Scope::new("timer");
         self.finish_capture_if_released();
 
         if let Some(result) = self
@@ -870,7 +947,7 @@ impl App {
         }
         self.refresh_tray_language();
     }
-    fn start_update(&mut self, update: Option<crate::updates::Update>) {
+    fn start_update(&mut self, update: Option<crate::updates::Update>, startup: bool) {
         if self.update.is_some() || self.exit_requested {
             return;
         }
@@ -878,47 +955,78 @@ impl App {
         let (sender, results) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
+        let progress = Arc::new(updater::Progress::default());
+        let worker_progress = Arc::clone(&progress);
         match thread::Builder::new()
             .name("github-update".into())
             .spawn(move || {
                 let result = match update {
-                    Some(update) => {
-                        UpdateResult::Installed(updater::install(&update, &worker_cancel))
-                    }
+                    Some(update) => UpdateResult::Installed(updater::install(
+                        &update,
+                        &worker_cancel,
+                        &worker_progress,
+                    )),
                     None => UpdateResult::Checked(updater::check(&worker_cancel)),
                 };
                 let _ = sender.send(result);
             }) {
             Ok(worker) => {
                 self.update = Some(UpdateJob {
+                    startup,
+                    installing,
+                    progress,
                     results,
                     cancel,
                     worker,
                 });
-                self.set_text(
-                    self.subtitle,
-                    if installing {
-                        "Downloading and verifying update..."
-                    } else {
-                        "Checking GitHub for updates..."
-                    },
-                );
+                if !startup {
+                    self.set_text(
+                        self.subtitle,
+                        if installing {
+                            "Downloading and verifying update..."
+                        } else {
+                            "Checking GitHub for updates..."
+                        },
+                    );
+                }
             }
-            Err(error) => about::update_status(
-                self.window,
-                &format!("Could not start the update: {error}"),
-                true,
-            ),
+            Err(error) => {
+                self.update_status = format!("Could not start the update: {error}");
+                if !startup {
+                    about::update_status(self.window, &self.update_status, true);
+                }
+            }
+        }
+    }
+    fn offer_update(&mut self, update: crate::updates::Update) {
+        if self.update.is_some() {
+            self.check_updates();
+            return;
+        }
+        if about::offer_update(self.window, &update) {
+            self.open();
+            self.start_update(Some(update), false);
         }
     }
     fn check_updates(&mut self) {
-        if self.update.is_some() {
-            self.notify("An update check or download is already in progress.");
+        if let Some(job) = &mut self.update {
+            if job.startup {
+                job.startup = false;
+                self.set_text(self.subtitle, "Checking GitHub for updates...");
+            } else {
+                self.notify("An update check or download is already in progress.");
+            }
             return;
         }
-        self.start_update(None);
+        self.start_update(None, false);
     }
     fn poll_update(&mut self) {
+        if let Some(job) = &self.update
+            && job.installing
+            && !self.exit_requested
+        {
+            self.set_text(self.subtitle, &job.progress.text());
+        }
         let result = self
             .update
             .as_ref()
@@ -932,7 +1040,9 @@ impl App {
         let Some(result) = result else {
             return;
         };
+        let mut startup = false;
         if let Some(job) = self.update.take() {
+            startup = job.startup;
             let _ = job.worker.join();
         }
         if self.exit_requested {
@@ -940,31 +1050,43 @@ impl App {
         }
         match result {
             UpdateResult::Checked(Ok(Some(update))) => {
-                self.set_text(
-                    self.subtitle,
-                    &format!("Version {} is available.", update.version),
-                );
-                if about::offer_update(self.window, &update) {
-                    self.start_update(Some(update));
+                self.update_status = format!("Version {} is available.", update.version);
+                self.available_update = Some(update.clone());
+                if startup {
+                    self.set_text(
+                        self.subtitle,
+                        &format!("{} Open About to update.", self.update_status),
+                    );
+                    self.notify(&format!("Version {} is available. Open About or the tray menu to download and install it.",update.version));
+                } else {
+                    self.set_text(self.subtitle, &self.update_status);
+                    self.offer_update(update);
                 }
             }
             UpdateResult::Checked(Ok(None)) => {
-                self.set_text(self.subtitle, "You are up to date.");
-                about::update_status(
-                    self.window,
-                    &format!(
-                        "You are up to date. Installed version: {}.",
-                        env!("CARGO_PKG_VERSION")
-                    ),
-                    false,
-                );
+                self.available_update = None;
+                self.update_status = "You are up to date.".into();
+                if !startup {
+                    self.set_text(self.subtitle, &self.update_status);
+                    about::update_status(
+                        self.window,
+                        &format!(
+                            "You are up to date. Installed version: {}.",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                        false,
+                    );
+                }
             }
             UpdateResult::Checked(Err(error)) | UpdateResult::Installed(Err(error)) => {
-                self.set_text(
-                    self.subtitle,
-                    "Update failed. Your current app is unchanged.",
-                );
-                about::update_status(self.window, &error, true);
+                self.update_status = format!("Update check or download failed: {error}");
+                if !startup {
+                    self.set_text(
+                        self.subtitle,
+                        "Update failed. Your current app is unchanged.",
+                    );
+                    about::update_status(self.window, &error, true);
+                }
             }
             UpdateResult::Installed(Ok(())) => {
                 self.set_text(self.subtitle, "Restarting to finish the update...");
@@ -994,26 +1116,76 @@ impl App {
         }
     }
     fn paint(&mut self) {
-        // SAFETY: BeginPaint/EndPaint are paired, and all selected GDI objects are restored.
+        // SAFETY: the HWND is owned by this UI thread. Hidden/minimized windows have
+        // no frame to present, and an empty update region requires no paint work.
         unsafe {
+            if IsWindowVisible(self.window) == 0 || IsIconic(self.window) != 0 {
+                ValidateRect(self.window, null());
+                return;
+            }
+            if GetUpdateRect(self.window, null_mut(), 0) == 0 {
+                return;
+            }
+            #[cfg(feature = "desktop-tests")]
+            let _timing = super::diagnostics::Scope::new("paint");
             let mut paint = PAINTSTRUCT::default();
             let dc = BeginPaint(self.window, &mut paint);
-            FillRect(dc, &paint.rcPaint, self.brush(BG));
-            let pen = SelectObject(dc, GetStockObject(NULL_PEN));
-            for (rect, color) in [([24, 85, 416, 51], GREEN), ([24, 307, 416, 90], WHITE)] {
-                let old = SelectObject(dc, self.brush(color));
-                RoundRect(
-                    dc,
-                    self.s(rect[0]),
-                    self.s(rect[1]),
-                    self.s(rect[0] + rect[2]),
-                    self.s(rect[1] + rect[3]),
-                    self.s(14),
-                    self.s(14),
-                );
-                SelectObject(dc, old);
+            let mut bounds = RECT::default();
+            GetClientRect(self.window, &mut bounds);
+            let width = bounds.right;
+            let height = bounds.bottom;
+            let scene = Scene {
+                background: BG,
+                cards: [
+                    Card {
+                        rect: [24, 85, 416, 51],
+                        radius: 7,
+                        color: GREEN,
+                    },
+                    Card {
+                        rect: [24, 307, 416, 90],
+                        radius: 7,
+                        color: WHITE,
+                    },
+                ],
+            };
+            #[cfg(feature = "desktop-tests")]
+            let previous = self.frame.generations();
+            #[cfg(feature = "desktop-tests")]
+            let raster_started = std::time::Instant::now();
+            let prepared = self.frame.prepare(width, height, self.scale, scene);
+            if prepared.is_some() {
+                let mut upload = prepared == Some(true);
+                if !self
+                    .surface
+                    .as_ref()
+                    .is_some_and(|surface| surface.matches(width, height))
+                {
+                    self.surface = Surface::new(dc, width, height);
+                    upload = true;
+                }
+                if let Some(surface) = &mut self.surface {
+                    if upload {
+                        #[cfg(feature = "desktop-tests")]
+                        let _upload = super::diagnostics::Scope::new("cpu_upload");
+                        surface.upload(self.frame.pixels());
+                    }
+                    #[cfg(feature = "desktop-tests")]
+                    if self.frame.generations() != previous {
+                        super::diagnostics::record(
+                            "cpu_raster",
+                            raster_started.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                    if !surface.present(dc, paint.rcPaint) {
+                        FillRect(dc, &paint.rcPaint, self.brush(BG));
+                    }
+                } else {
+                    FillRect(dc, &paint.rcPaint, self.brush(BG));
+                }
+            } else {
+                FillRect(dc, &paint.rcPaint, self.brush(BG));
             }
-            SelectObject(dc, pen);
             EndPaint(self.window, &paint);
         }
     }
@@ -1032,6 +1204,8 @@ impl App {
         self.brush(colors.1) as LRESULT
     }
     fn dpi_changed(&mut self, dpi: u32, suggested: *const RECT) {
+        #[cfg(feature = "desktop-tests")]
+        let _timing = super::diagnostics::Scope::new("dpi");
         self.scale = dpi as f32 / 96.0;
         let old_fonts = std::mem::take(&mut self.fonts);
         self.create_fonts();
@@ -1045,7 +1219,7 @@ impl App {
                 rect.top,
                 rect.right - rect.left,
                 rect.bottom - rect.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
             );
             for widget in &self.widgets {
                 SetWindowPos(
@@ -1055,19 +1229,26 @@ impl App {
                     self.s(widget.rect[1]),
                     self.s(widget.rect[2]),
                     self.s(widget.rect[3]),
-                    SWP_NOZORDER | SWP_NOACTIVATE,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
                 );
                 SendMessageW(
                     widget.handle,
                     WM_SETFONT,
                     self.fonts[widget.font] as usize,
-                    1,
+                    0,
                 );
             }
             for font in old_fonts {
                 DeleteObject(font);
             }
-            InvalidateRect(self.window, null(), 1);
+            // Schedule one complete repaint after every control has its new bounds
+            // and font. Synchronous painting here would observe a half-updated layout.
+            RedrawWindow(
+                self.window,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+            );
         }
     }
     fn tray_menu(&mut self) {
@@ -1091,16 +1272,23 @@ impl App {
                 })
                 .as_ptr(),
             );
+            let update_label = if self.update.is_some() {
+                "Update in progress...".into()
+            } else if let Some(update) = &self.available_update {
+                format!("Download and install v{}...", update.version)
+            } else {
+                "Check for updates".into()
+            };
             AppendMenuW(
                 menu,
-                MF_STRING | if self.update.is_some() { MF_GRAYED } else { 0 },
+                MF_STRING
+                    | if self.update.as_ref().is_some_and(|job| !job.startup) {
+                        MF_GRAYED
+                    } else {
+                        0
+                    },
                 UPDATE_ID,
-                wide(if self.update.is_some() {
-                    "Update in progress..."
-                } else {
-                    "Check for updates"
-                })
-                .as_ptr(),
+                wide(&update_label).as_ptr(),
             );
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, QUIT_ID, wide("Quit").as_ptr());
@@ -1127,6 +1315,8 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        #[cfg(feature = "desktop-tests")]
+        super::diagnostics::flush();
         self.capture_hook.take();
         if let Some(job) = self.update.take() {
             job.cancel.store(true, Ordering::Relaxed);
@@ -1176,6 +1366,11 @@ unsafe extern "system" fn window_proc(
             let create = &*(lparam as *const CREATESTRUCTW);
             SetWindowLongPtrW(window, GWLP_USERDATA, create.lpCreateParams as isize);
         }
+        #[cfg(feature = "desktop-tests")]
+        if message == super::diagnostics::REPORT_MESSAGE {
+            super::diagnostics::flush();
+            return 0;
+        }
         if message == WM_DESTROY {
             PostQuitMessage(0);
             return 0;
@@ -1185,6 +1380,12 @@ unsafe extern "system" fn window_proc(
             && let Ok(mut app) = (*pointer).try_borrow_mut()
         {
             match message {
+                STARTUP_UPDATE_MESSAGE => {
+                    if app.startup_update_checks {
+                        app.start_update(None, true);
+                    }
+                    return 0;
+                }
                 WM_PAINT => {
                     app.paint();
                     return 0;
@@ -1199,6 +1400,7 @@ unsafe extern "system" fn window_proc(
                 }
                 CAPTURE_MESSAGE => {
                     app.capture_key(wparam as u16, (lparam & 0xff) as u16, lparam & 0x100 != 0);
+                    app.finish_capture_if_released();
                     return 0;
                 }
                 WM_HOTKEY => {

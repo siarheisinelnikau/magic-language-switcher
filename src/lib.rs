@@ -3,5 +3,8 @@ pub mod layout;
 pub mod shortcuts;
 pub mod updates;
 
+#[cfg(any(windows, test))]
+mod raster;
+
 #[cfg(windows)]
 pub mod platform;
