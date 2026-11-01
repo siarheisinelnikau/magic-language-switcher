@@ -62,11 +62,14 @@ jobs:
           $tag = $env:RELEASE_TAG
           $directory = "artifacts/$tag"
           $executable = "$directory/MagicLanguageSwitcher-$tag.exe"
-          $existing = gh release view $tag --json isDraft 2>$null
+          $existing = gh release view $tag --json isDraft,targetCommitish 2>$null
           $releaseExists = $LASTEXITCODE -eq 0
           if ($releaseExists -and -not ($existing | ConvertFrom-Json).isDraft) {
             Write-Output "Release $tag is already published."
             exit 0
+          }
+          if ($releaseExists -and ($existing | ConvertFrom-Json).targetCommitish -ne $env:GITHUB_SHA) {
+            throw 'An existing draft belongs to another commit and will not be replaced.'
           }
           if ($env:BOOTSTRAP -eq 'true') {
             $tagCommit = gh api "repos/$env:GH_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>$null
