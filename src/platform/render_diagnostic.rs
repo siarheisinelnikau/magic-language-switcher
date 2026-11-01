@@ -79,6 +79,7 @@ struct Sample {
 }
 pub struct Diagnostic {
     path: PathBuf,
+    capture: Option<(PathBuf, crate::i18n::Language, crate::i18n::Theme)>,
     phase: usize,
     started: Instant,
     baseline: Option<(Instant, f64, Counts)>,
@@ -90,6 +91,29 @@ impl Diagnostic {
     }
     pub fn from_args() -> Result<Option<Self>, String> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.first().is_some_and(|arg| arg == "--capture-settings") {
+            if args.len() != 4 {
+                return Err(
+                    "Usage: --capture-settings <output.png> <en|ru|fr|de|es|it> <light|dark>"
+                        .into(),
+                );
+            }
+            let language_code = args[2].to_string_lossy();
+            let theme_code = args[3].to_string_lossy();
+            let language = crate::i18n::Language::parse(&language_code);
+            let theme = crate::i18n::Theme::parse(&theme_code);
+            if language.code() != language_code || theme.code() != theme_code {
+                return Err("Unknown capture language or theme.".into());
+            }
+            return Ok(Some(Self {
+                path: PathBuf::new(),
+                capture: Some(((&args[1]).into(), language, theme)),
+                phase: 0,
+                started: Instant::now(),
+                baseline: None,
+                samples: Vec::new(),
+            }));
+        }
         if !args.iter().any(|arg| arg == "--diagnose-render") {
             return Ok(None);
         }
@@ -99,11 +123,20 @@ impl Diagnostic {
         ACTIVE.set(true);
         Ok(Some(Self {
             path: (&args[1]).into(),
+            capture: None,
             phase: 0,
             started: Instant::now(),
             baseline: None,
             samples: Vec::new(),
         }))
+    }
+    pub fn appearance(&self) -> Option<(crate::i18n::Language, crate::i18n::Theme)> {
+        self.capture
+            .as_ref()
+            .map(|(_, language, theme)| (*language, *theme))
+    }
+    pub fn take_capture(&mut self) -> Option<PathBuf> {
+        self.capture.take().map(|(path, _, _)| path)
     }
     /// Called by the host's existing timer; transitions affect only its own window.
     pub fn tick(&mut self, window: HWND) -> bool {

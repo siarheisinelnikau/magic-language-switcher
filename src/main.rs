@@ -9,9 +9,10 @@ fn main() {
             argument == "--apply-update"
                 || argument == "--test-updater"
                 || argument == "--diagnose-render"
+                || argument == "--capture-settings"
                 || argument.starts_with("--updater-smoke-")
         }) {
-            eprintln!("Update failed: {error}");
+            eprintln!("Internal operation failed: {error}");
             std::process::exit(1);
         }
         magic_language_switcher::platform::show_error(&error);

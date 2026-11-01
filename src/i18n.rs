@@ -37,7 +37,7 @@ impl Language {
             .find(|language| language.code() == value)
             .unwrap_or_default()
     }
-    pub fn text<'a>(self, source: &'a str) -> &'a str {
+    pub fn text(self, source: &str) -> &str {
         if self == Self::English {
             return source;
         }
@@ -47,10 +47,24 @@ impl Language {
             .map_or(source, |(_, translations)| translations[self as usize - 1])
     }
     pub fn format(self, source: &str, values: &[(&str, &str)]) -> String {
-        let mut text = self.text(source).to_owned();
-        for (name, value) in values {
-            text = text.replace(&format!("{{{name}}}"), value);
+        let mut template = self.text(source);
+        let mut text = String::with_capacity(template.len());
+        while let Some(open) = template.find('{') {
+            text.push_str(&template[..open]);
+            template = &template[open..];
+            let Some(close) = template.find('}') else {
+                break;
+            };
+            let name = &template[1..close];
+            text.push_str(
+                values
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map_or(&template[..=close], |(_, value)| *value),
+            );
+            template = &template[close + 1..];
         }
+        text.push_str(template);
         text
     }
     /// Only known application messages are translated; arbitrary editor data is untouched.
@@ -1188,6 +1202,16 @@ mod tests {
                 language.format("Version {version} is available.", &[("version", "12.3.4")]);
             assert!(result.contains("12.3.4"));
             assert!(!result.contains('{'));
+        }
+    }
+    #[test]
+    fn dynamic_values_are_inserted_verbatim_without_interpreting_their_braces() {
+        for language in Language::ALL {
+            let value = language.format(
+                "{detail} Previous shortcut kept.",
+                &[("detail", "user {version}.txt"), ("version", "1.2.3")],
+            );
+            assert!(value.contains("user {version}.txt"));
         }
     }
 }

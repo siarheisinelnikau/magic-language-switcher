@@ -217,12 +217,17 @@ impl App {
                 RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
             );
         }
-        self.set_text(
-            unsafe { GetDlgItem(self.window, PAUSE_ID as i32) },
-            if self.enabled { "Pause" } else { "Resume" },
-        );
+        // SAFETY: PAUSE_ID is the button created by initialize.
+        let pause = unsafe { GetDlgItem(self.window, PAUSE_ID as i32) };
+        self.set_text(pause, if self.enabled { "Pause" } else { "Resume" });
         self.populate_layouts();
         self.refresh_status();
+        if let Some(update) = &self.available_update {
+            self.update_status = self.language.format(
+                "Version {version} is available.",
+                &[("version", &update.version.to_string())],
+            );
+        }
         if self.tray_added {
             self.update_tray(NIM_MODIFY);
         }
@@ -270,11 +275,18 @@ impl App {
         scale: f32,
         diagnostic: Option<super::render_diagnostic::Diagnostic>,
     ) -> Self {
-        let preferences = if diagnostic.is_some() {
+        let mut preferences = if diagnostic.is_some() {
             settings::Preferences::default()
         } else {
             settings::load()
         };
+        if let Some((language, theme)) = diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.appearance())
+        {
+            preferences.language = language;
+            preferences.theme = theme;
+        }
         Self {
             diagnostic,
             window: null_mut(),
@@ -374,7 +386,9 @@ impl App {
         foreground: u32,
         background: u32,
     ) -> HWND {
-        let style = if class == "BUTTON" && style & 0xf == BS_PUSHBUTTON as u32 {
+        let style = if class == "COMBOBOX" {
+            style | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32
+        } else if class == "BUTTON" && style & 0xf == BS_PUSHBUTTON as u32 {
             style | BS_OWNERDRAW as u32
         } else {
             style
@@ -810,10 +824,9 @@ impl App {
         self.enabled = !self.enabled;
         self.refresh_status();
         // SAFETY: PAUSE_ID is a child button created in initialize.
-        self.set_text(
-            unsafe { GetDlgItem(self.window, PAUSE_ID as i32) },
-            if self.enabled { "Pause" } else { "Resume" },
-        );
+        // SAFETY: PAUSE_ID is the button created by initialize.
+        let pause = unsafe { GetDlgItem(self.window, PAUSE_ID as i32) };
+        self.set_text(pause, if self.enabled { "Pause" } else { "Resume" });
         self.last_language.clear();
         self.refresh_tray_language();
     }
@@ -1382,6 +1395,13 @@ impl App {
             let _timing = super::diagnostics::Scope::new("paint");
             let mut paint = PAINTSTRUCT::default();
             let dc = BeginPaint(self.window, &mut paint);
+            self.render_to(dc, paint.rcPaint);
+            EndPaint(self.window, &paint);
+        }
+    }
+    fn render_to(&mut self, dc: HDC, invalid: RECT) {
+        // SAFETY: the caller owns a live paint/print DC and supplies its clipping rectangle.
+        unsafe {
             let mut bounds = RECT::default();
             GetClientRect(self.window, &mut bounds);
             let width = bounds.right;
@@ -1432,16 +1452,15 @@ impl App {
                             raster_started.elapsed().as_secs_f64() * 1000.0,
                         );
                     }
-                    if !surface.present(dc, paint.rcPaint) {
-                        FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
+                    if !surface.present(dc, invalid) {
+                        FillRect(dc, &invalid, self.brush(self.color(BG)));
                     }
                 } else {
-                    FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
+                    FillRect(dc, &invalid, self.brush(self.color(BG)));
                 }
             } else {
-                FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
+                FillRect(dc, &invalid, self.brush(self.color(BG)));
             }
-            EndPaint(self.window, &paint);
         }
     }
     fn color_control(&mut self, dc: HDC, child: HWND) -> LRESULT {
@@ -1499,6 +1518,47 @@ impl App {
             if item.itemState & ODS_FOCUS != 0 {
                 InflateRect(&mut rect, -3, -3);
                 DrawFocusRect(item.hDC, &rect);
+            }
+            SelectObject(item.hDC, old);
+        }
+    }
+    fn draw_combo(&mut self, item: &DRAWITEMSTRUCT) {
+        let selected = item.itemState & ODS_SELECTED != 0;
+        let background = self.color(if selected { PALE } else { WHITE });
+        let foreground = self.color(INK);
+        let brush = self.brush(background);
+        // SAFETY: WM_DRAWITEM supplies the live combo/DC; the bounded buffer includes NUL.
+        unsafe {
+            FillRect(item.hDC, &item.rcItem, brush);
+            if item.itemID == u32::MAX {
+                return;
+            }
+            let length = SendMessageW(item.hwndItem, CB_GETLBTEXTLEN, item.itemID as usize, 0);
+            if !(0..=4096).contains(&length) {
+                return;
+            }
+            let mut text = vec![0u16; length as usize + 1];
+            SendMessageW(
+                item.hwndItem,
+                CB_GETLBTEXT,
+                item.itemID as usize,
+                text.as_mut_ptr() as isize,
+            );
+            let old = SelectObject(item.hDC, self.fonts[0]);
+            SetBkMode(item.hDC, TRANSPARENT as i32);
+            SetTextColor(item.hDC, foreground);
+            let mut rect = item.rcItem;
+            rect.left += self.s(4);
+            rect.right -= self.s(2);
+            DrawTextW(
+                item.hDC,
+                text.as_ptr(),
+                length as i32,
+                &mut rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            if item.itemState & ODS_FOCUS != 0 {
+                DrawFocusRect(item.hDC, &item.rcItem);
             }
             SelectObject(item.hDC, old);
         }
@@ -1698,10 +1758,28 @@ unsafe extern "system" fn window_proc(
                     app.paint();
                     return 0;
                 }
+                WM_PRINTCLIENT => {
+                    let mut rect = RECT::default();
+                    GetClientRect(window, &mut rect);
+                    app.render_to(wparam as HDC, rect);
+                    return 0;
+                }
                 WM_ERASEBKGND => return 1,
                 WM_DRAWITEM => {
-                    app.draw_button(&*(lparam as *const DRAWITEMSTRUCT));
+                    let item = &*(lparam as *const DRAWITEMSTRUCT);
+                    if item.CtlType == ODT_COMBOBOX {
+                        app.draw_combo(item);
+                    } else {
+                        app.draw_button(item);
+                    }
                     return 1;
+                }
+                WM_MEASUREITEM => {
+                    let item = &mut *(lparam as *mut MEASUREITEMSTRUCT);
+                    if item.CtlType == ODT_COMBOBOX {
+                        item.itemHeight = app.s(22) as u32;
+                        return 1;
+                    }
                 }
                 WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                     return app.color_control(wparam as HDC, lparam as HWND);
@@ -2036,6 +2114,17 @@ pub fn run() -> Result<(), String> {
             if !keyboard_message || IsDialogMessageW(window, &message) == 0 {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
+            }
+            let capture = app
+                .borrow_mut()
+                .diagnostic
+                .as_mut()
+                .and_then(|diagnostic| diagnostic.take_capture());
+            if let Some(path) = capture {
+                let result = super::capture::save(window, &path);
+                DestroyWindow(window);
+                result?;
+                break;
             }
         }
         drop(app);
