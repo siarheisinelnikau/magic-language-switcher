@@ -8,11 +8,15 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 
 `ghbdtn vbh` → `привет мир` is one example. Conversion uses the keyboard layouts installed in Windows, rather than a hardcoded English/Russian pair.
 
-**[Download Windows x64 — v0.1.3](https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v0.1.3/MagicLanguageSwitcher-v0.1.3.exe)** · [Release notes](https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v0.1.3) · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
+**[Download Windows x64 — v0.2.0](https://github.com/siarheisinelnikau/magic-language-switcher/releases/download/v0.2.0/MagicLanguageSwitcher-v0.2.0.exe)** · [Release notes](https://github.com/siarheisinelnikau/magic-language-switcher/releases/tag/v0.2.0) · [Report an issue](https://github.com/siarheisinelnikau/magic-language-switcher/issues)
 
-![Magic Language Switcher settings with installed keyboard layouts, two editable shortcuts, and a conversion preview](assets/settings.png)
+![Magic Language Switcher settings in English with the light theme, keyboard layouts, shortcuts, and language and theme dropdowns](assets/settings.png)
 
-*The application settings window: choose layouts, customize correction and undo, and try a conversion without leaving the app.*
+*Settings in English with the light theme, including the saved language and theme choices. Real v0.2.0 client-area capture at 100% scale with an empty preview.*
+
+![Magic Language Switcher settings in Russian with the dark theme and dark native dropdown contents](assets/settings-dark-ru.png)
+
+*The same settings window in Russian with the dark theme. These isolated application captures use real native controls; they do not show OS tray interactions or Windows-owned dialogs.*
 
 ## What it does
 
@@ -20,11 +24,13 @@ A lightweight **Windows app** that fixes text typed in the wrong keyboard layout
 - **Separate undo:** restore the last correction while the text and caret still match.
 - **Installed Windows layouts:** select any supported direct-key layout pair, including variants and AltGr mappings.
 - **Compact native UI:** editable shortcuts, a live preview, optional Windows startup, and an active-language tray icon.
+- **Six interface languages:** English, Русский, Français, Deutsch, Español, and Italiano; switch instantly in settings.
+- **Light and dark themes:** a simple saved choice in the same settings window.
 - **Portable Rust app:** one EXE with in-app GitHub update checks, verified downloads, and restart.
 
 ## Get started
 
-1. Download the EXE from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest). The v0.1.3 file is **`MagicLanguageSwitcher-v0.1.3.exe`**, a Windows x64 build.
+1. Download the EXE from [Releases](https://github.com/siarheisinelnikau/magic-language-switcher/releases/latest). The v0.2.0 file is **`MagicLanguageSwitcher-v0.2.0.exe`**, a Windows x64 build.
 2. Put it in a folder you want to keep and run it. No installer, .NET, browser engine, or VC++ redistributable is needed.
 3. Select mistyped text, or leave the caret after a mistyped word, and press **F8**. The same key handles both cases.
 
@@ -65,9 +71,21 @@ This is physical-key conversion, not translation or transliteration. **IME candi
 
 - **Pause** temporarily disables correction shortcuts; the language icon remains available.
 - **Start with Windows** adds this EXE to your own user's startup entries. Keep the EXE in its final folder before enabling it; disable the option before moving or deleting it.
-- Layout choices and shortcuts are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
+- **Language** changes the interface independently of the **From** and **To** keyboard conversion layouts. English is the default; the six language names stay in their native spelling so you can always find your language.
+- **Theme → Light / Dark** changes the settings palette immediately. The selected language and theme survive restart. Windows-owned menus and dialogs retain native Windows styling.
+- Layout choices, shortcuts, language, and theme are saved in `%LOCALAPPDATA%\MagicLanguageSwitcher\settings.conf`.
 - Run with `--background` to start directly in the tray.
 - **About** contains the installed version, project link, manual update check, startup-check toggle, and an expandable MIT license.
+
+## Capture a settings screenshot
+
+The developer-only capture mode renders the real client area with native controls, saves a PNG, and exits. It uses isolated default preferences, reads installed keyboard layouts, and starts no tray icon, shortcuts, correction worker, update requests, or Windows startup changes. It does not capture the desktop or inject input.
+
+```powershell
+.\target\release\magic-language-switcher.exe --capture-settings C:\Temp\settings.png ru dark
+```
+
+Choose `en`, `ru`, `fr`, `de`, `es`, or `it`, followed by `light` or `dark`. Apply an external timeout when using this diagnostic in automation. A capture checks layout and colors; it does not prove interactive tray behavior or normal idle performance.
 
 ## Updates
 
@@ -105,10 +123,10 @@ Package the executable with the release naming convention:
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/package-release.ps1
 ```
 
-This builds a Windows x64 EXE, checks its PE imports, and writes `MagicLanguageSwitcher-vVERSION.exe` and `SHA256SUMS.txt` to `artifacts\vVERSION\`, using the Cargo package version. The checksum file names the exact packaged EXE. For a source package with version 0.1.3:
+This builds a Windows x64 EXE, checks its PE imports, and writes `MagicLanguageSwitcher-vVERSION.exe` and `SHA256SUMS.txt` to `artifacts\vVERSION\`, using the Cargo package version. The checksum file names the exact packaged EXE. For a source package with version 0.2.0:
 
 ```powershell
-Get-FileHash .\artifacts\v0.1.3\MagicLanguageSwitcher-v0.1.3.exe -Algorithm SHA256
+Get-FileHash .\artifacts\v0.2.0\MagicLanguageSwitcher-v0.2.0.exe -Algorithm SHA256
 ```
 
 ## Tests

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 — 2026-11-01
+
+### Added
+- English, Russian, French, German, Spanish, and Italian interface localization across settings, correction guidance, shortcut editing, tray actions, About, and update controls.
+- Saved language and light/dark theme dropdowns in the settings window, applied immediately without changing keyboard conversion layouts or shortcut preferences.
+- A finite, isolated native settings capture mode for checking localized layouts and both themes.
+
+### Improved
+- Theme-aware retained CPU backgrounds, native edit/list colors, accessible button labels, keyboard focus, and owner-drawn button states.
+- Migration of existing settings keeps conversion layouts, shortcuts, and the startup update opt-out.
+- Catalog checks cover complete translations, unique messages, and matching dynamic placeholders.
+
 ## 0.1.3 — 2026-10-31
 
 - Nonblocking update checks on startup, enabled by default with a persistent About opt-out; no-update results and startup errors stay quiet.
