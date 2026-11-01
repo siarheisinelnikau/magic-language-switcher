@@ -34,17 +34,19 @@ pub struct Progress {
     total: AtomicU64,
 }
 impl Progress {
-    pub fn text(&self) -> String {
+    pub fn text(&self, language: crate::i18n::Language) -> String {
         let total = self.total.load(Ordering::Acquire);
         let bytes = self.bytes.load(Ordering::Relaxed).min(total);
         if total == 0 {
-            return "Connecting to GitHub...".into();
+            return language.text("Connecting to GitHub...").into();
         }
-        format!(
-            "Downloading and verifying update: {}% ({:.2}/{:.2} MB)",
-            bytes.saturating_mul(100) / total,
-            bytes as f64 / 1048576.0,
-            total as f64 / 1048576.0
+        language.format(
+            "Downloading and verifying update: {percent}% ({received}/{total} MB)",
+            &[
+                ("percent", &(bytes.saturating_mul(100) / total).to_string()),
+                ("received", &format!("{:.2}", bytes as f64 / 1048576.0)),
+                ("total", &format!("{:.2}", total as f64 / 1048576.0)),
+            ],
         )
     }
 }

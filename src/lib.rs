@@ -1,4 +1,5 @@
 //! Physical-key layout conversion and the native Windows desktop application.
+pub mod i18n;
 pub mod layout;
 pub mod shortcuts;
 #[cfg(windows)]

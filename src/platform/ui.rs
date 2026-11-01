@@ -9,6 +9,7 @@ use super::{
     updater,
 };
 use crate::{
+    i18n::{Language, Theme},
     layout::{Catalog, Selection},
     raster::{Card, Frame, Scene},
     shortcuts::{Shortcut, Shortcuts},
@@ -27,7 +28,7 @@ use std::{
 use windows_sys::Win32::{
     Foundation::*,
     Globalization::*,
-    Graphics::Gdi::*,
+    Graphics::{Dwm::*, Gdi::*},
     System::{LibraryLoader::*, SystemServices::*, Threading::*},
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
@@ -47,6 +48,8 @@ const SHORTCUT_FIRST_ID: usize = 120;
 const OPEN_ID: usize = 201;
 const TRAY_PAUSE_ID: usize = 202;
 const UPDATE_ID: usize = 206;
+const LANGUAGE_ID: usize = 207;
+const THEME_ID: usize = 208;
 const STARTUP_UPDATE_MESSAGE: u32 = WM_APP + 21;
 const BG: u32 = rgb(246, 248, 252);
 const INK: u32 = rgb(29, 43, 66);
@@ -60,6 +63,7 @@ const fn rgb(r: u32, g: u32, b: u32) -> u32 {
 }
 
 struct Widget {
+    source: String,
     handle: HWND,
     rect: [i32; 4],
     font: usize,
@@ -131,11 +135,135 @@ struct App {
     worker: Option<thread::JoinHandle<()>>,
     update: Option<UpdateJob>,
     startup_update_checks: bool,
+    language: Language,
+    theme: Theme,
     available_update: Option<crate::updates::Update>,
     update_status: String,
 }
 
 impl App {
+    fn color(&self, color: u32) -> u32 {
+        if self.theme == Theme::Light {
+            return color;
+        }
+        match color {
+            BG => rgb(19, 25, 35),
+            WHITE => rgb(30, 39, 53),
+            INK => rgb(233, 239, 248),
+            MUTED => rgb(168, 183, 204),
+            BLUE => rgb(136, 177, 255),
+            PALE => rgb(42, 55, 75),
+            GREEN => rgb(27, 59, 51),
+            value if value == rgb(27, 105, 83) => rgb(137, 226, 194),
+            value => value,
+        }
+    }
+    fn refresh_appearance(&mut self) {
+        // SAFETY: all controls are app-owned, and Win32 copies each label synchronously.
+        unsafe {
+            let language_control = GetDlgItem(self.window, LANGUAGE_ID as i32);
+            SendMessageW(language_control, CB_RESETCONTENT, 0, 0);
+            for language in Language::ALL {
+                SendMessageW(
+                    language_control,
+                    CB_ADDSTRING,
+                    0,
+                    wide(language.native_name()).as_ptr() as isize,
+                );
+            }
+            SendMessageW(language_control, CB_SETCURSEL, self.language as usize, 0);
+            let theme_control = GetDlgItem(self.window, THEME_ID as i32);
+            SendMessageW(theme_control, CB_RESETCONTENT, 0, 0);
+            for label in ["Light", "Dark"] {
+                SendMessageW(
+                    theme_control,
+                    CB_ADDSTRING,
+                    0,
+                    wide(self.language.text(label)).as_ptr() as isize,
+                );
+            }
+            SendMessageW(
+                theme_control,
+                CB_SETCURSEL,
+                usize::from(self.theme == Theme::Dark),
+                0,
+            );
+            for widget in &self.widgets {
+                if Language::Russian.text(&widget.source) != widget.source {
+                    self.set_text(widget.handle, &widget.source);
+                }
+                SetWindowTheme(
+                    widget.handle,
+                    wide(if self.theme == Theme::Dark {
+                        "DarkMode_Explorer"
+                    } else {
+                        "Explorer"
+                    })
+                    .as_ptr(),
+                    null(),
+                );
+            }
+            let dark = i32::from(self.theme == Theme::Dark);
+            DwmSetWindowAttribute(
+                self.window,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
+            RedrawWindow(
+                self.window,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN,
+            );
+        }
+        self.set_text(
+            unsafe { GetDlgItem(self.window, PAUSE_ID as i32) },
+            if self.enabled { "Pause" } else { "Resume" },
+        );
+        self.populate_layouts();
+        self.refresh_status();
+        if self.tray_added {
+            self.update_tray(NIM_MODIFY);
+        }
+    }
+    fn change_appearance(&mut self) {
+        // SAFETY: these are our two dropdown-list controls with fixed choices.
+        let (language, theme) = unsafe {
+            (
+                SendMessageW(
+                    GetDlgItem(self.window, LANGUAGE_ID as i32),
+                    CB_GETCURSEL,
+                    0,
+                    0,
+                ),
+                SendMessageW(GetDlgItem(self.window, THEME_ID as i32), CB_GETCURSEL, 0, 0),
+            )
+        };
+        let language = Language::ALL
+            .get(language as usize)
+            .copied()
+            .unwrap_or(self.language);
+        let theme = if theme == 1 {
+            Theme::Dark
+        } else {
+            Theme::Light
+        };
+        match settings::save(settings::Preferences {
+            selection: self.selection,
+            shortcuts: self.shortcuts,
+            startup_update_checks: self.startup_update_checks,
+            language,
+            theme,
+        }) {
+            Ok(()) => {
+                self.language = language;
+                self.theme = theme;
+            }
+            Err(error) => self.notify(&error),
+        }
+        self.refresh_appearance();
+    }
     fn new(
         instance: HINSTANCE,
         icon: HICON,
@@ -183,6 +311,8 @@ impl App {
             worker: None,
             update: None,
             startup_update_checks: preferences.startup_update_checks,
+            language: preferences.language,
+            theme: preferences.theme,
             available_update: None,
             update_status: "No update check yet.".into(),
         }
@@ -244,12 +374,17 @@ impl App {
         foreground: u32,
         background: u32,
     ) -> HWND {
+        let style = if class == "BUTTON" && style & 0xf == BS_PUSHBUTTON as u32 {
+            style | BS_OWNERDRAW as u32
+        } else {
+            style
+        };
         // SAFETY: the parent window and instance are live, and Windows copies all string data.
         let handle = unsafe {
             let handle = CreateWindowExW(
                 0,
                 wide(class).as_ptr(),
-                wide(text).as_ptr(),
+                wide(self.language.text(text)).as_ptr(),
                 WS_CHILD | WS_VISIBLE | style,
                 self.s(rect[0]),
                 self.s(rect[1]),
@@ -264,6 +399,7 @@ impl App {
             handle
         };
         self.widgets.push(Widget {
+            source: text.to_owned(),
             handle,
             rect,
             font,
@@ -412,6 +548,29 @@ impl App {
             INK,
             BG,
         );
+        self.label("Language", [24, 483, 198, 18], 4, MUTED, BG);
+        self.widget(
+            "COMBOBOX",
+            "",
+            [24, 505, 198, 180],
+            LANGUAGE_ID,
+            WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
+            0,
+            INK,
+            WHITE,
+        );
+        self.label("Theme", [242, 483, 198, 18], 4, MUTED, BG);
+        self.widget(
+            "COMBOBOX",
+            "",
+            [242, 505, 198, 100],
+            THEME_ID,
+            WS_TABSTOP | CBS_DROPDOWNLIST as u32,
+            0,
+            INK,
+            WHITE,
+        );
+        self.refresh_appearance();
         if self.diagnostic.is_some() {
             self.startup_update_checks = false;
             self.update_preview();
@@ -479,13 +638,20 @@ impl App {
             self.set_text(self.status, "●  Shortcut conflict");
             self.set_text(
                 self.subtitle,
-                &format!("Already in use: {}", self.conflicts.join(", ")),
+                &self.language.format(
+                    "Already in use: {shortcuts}",
+                    &[("shortcuts", &self.conflicts.join(", "))],
+                ),
             );
-            self.notify(&format!("Already in use: {}. Click the unavailable shortcut in settings to choose another combination.", self.conflicts.join(", ")));
+            self.notify(&self.language.format("Already in use: {shortcuts}. Click the unavailable shortcut in settings to choose another combination.", &[("shortcuts", &self.conflicts.join(", "))]));
         }
         Ok(())
     }
     fn set_text(&self, handle: HWND, text: &str) {
+        let text = self.language.message(text);
+        self.set_raw_text(handle, &text);
+    }
+    fn set_raw_text(&self, handle: HWND, text: &str) {
         if window_text(handle) == text {
             return;
         }
@@ -502,7 +668,7 @@ impl App {
             .catalog
             .convert(&input, self.selection, keyboard::active())
             .map_or_else(|_| String::new(), |conversion| conversion.text);
-        self.set_text(self.output, &output);
+        self.set_raw_text(self.output, &output);
     }
     fn populate_layouts(&mut self) {
         if !self
@@ -528,7 +694,12 @@ impl App {
                 (self.to, "Next installed layout", self.selection.to),
             ] {
                 SendMessageW(control, CB_RESETCONTENT, 0, 0);
-                SendMessageW(control, CB_ADDSTRING, 0, wide(automatic).as_ptr() as isize);
+                SendMessageW(
+                    control,
+                    CB_ADDSTRING,
+                    0,
+                    wide(self.language.text(automatic)).as_ptr() as isize,
+                );
                 let mut choice = 0;
                 for (index, layout) in self.catalog.layouts.iter().enumerate() {
                     let item = SendMessageW(
@@ -564,7 +735,8 @@ impl App {
         let tip = format!(
             "Magic Language Switcher — {} — {}",
             self.last_language,
-            if self.enabled { "ready" } else { "paused" }
+            self.language
+                .text(if self.enabled { "ready" } else { "paused" })
         );
         copy_wide(&mut data.szTip, &tip);
         // SAFETY: NOTIFYICONDATAW has its native size and all buffers are inline and terminated.
@@ -597,7 +769,7 @@ impl App {
         data.uFlags = NIF_INFO;
         data.dwInfoFlags = NIIF_INFO;
         copy_wide(&mut data.szInfoTitle, "Magic Language Switcher");
-        copy_wide(&mut data.szInfo, message);
+        copy_wide(&mut data.szInfo, &self.language.message(message));
         // SAFETY: the fixed-size notification buffers are populated with bounded UTF-16.
         unsafe {
             Shell_NotifyIconW(NIM_MODIFY, &data);
@@ -784,6 +956,8 @@ impl App {
         self.capture_hook.take();
         let selection = self.selection;
         let startup_update_checks = self.startup_update_checks;
+        let language = self.language;
+        let theme = self.theme;
         let result = self
             .registrations
             .as_mut()
@@ -794,15 +968,29 @@ impl App {
                         selection,
                         shortcuts,
                         startup_update_checks,
+                        language,
+                        theme,
                     })
                 })
             });
         match result {
             Ok(shortcuts) => {
                 self.shortcuts = shortcuts;
-                self.set_text(self.subtitle, &format!("Shortcut saved: {shortcut}"));
+                self.set_text(
+                    self.subtitle,
+                    &self.language.format(
+                        "Shortcut saved: {shortcut}",
+                        &[("shortcut", &shortcut.to_string())],
+                    ),
+                );
             }
-            Err(error) => self.set_text(self.subtitle, &format!("{error} Previous shortcut kept.")),
+            Err(error) => self.set_text(
+                self.subtitle,
+                &self.language.format(
+                    "{detail} Previous shortcut kept.",
+                    &[("detail", &self.language.message(&error))],
+                ),
+            ),
         }
         self.show_shortcuts();
         self.refresh_status();
@@ -819,6 +1007,7 @@ impl App {
         self.cancel_capture();
 
         match id {
+            LANGUAGE_ID | THEME_ID if notification == CBN_SELCHANGE => self.change_appearance(),
             PAUSE_ID | TRAY_PAUSE_ID => self.toggle_pause(),
             OPEN_ID => self.open(),
             QUIT_ID => {
@@ -869,6 +1058,8 @@ impl App {
                     selection: self.selection,
                     shortcuts: self.shortcuts,
                     startup_update_checks: self.startup_update_checks,
+                    language: self.language,
+                    theme: self.theme,
                 }) {
                     self.notify(&error);
                 }
@@ -879,16 +1070,24 @@ impl App {
                     self.window,
                     self.icon,
                     self.startup_update_checks,
-                    &self.update_status,
+                    &self.language.message(&self.update_status),
+                    self.language,
                 ) {
                     if choice.startup_checks != self.startup_update_checks {
                         match settings::save(settings::Preferences {
                             selection: self.selection,
                             shortcuts: self.shortcuts,
                             startup_update_checks: choice.startup_checks,
+                            language: self.language,
+                            theme: self.theme,
                         }) {
                             Ok(()) => self.startup_update_checks = choice.startup_checks,
-                            Err(error) => about::update_status(self.window, &error, true),
+                            Err(error) => about::update_status(
+                                self.window,
+                                &self.language.message(&error),
+                                true,
+                                self.language,
+                            ),
                         }
                     }
                     if choice.check {
@@ -957,7 +1156,10 @@ impl App {
             match result {
                 Ok(message) => {
                     let message = if message == "Text corrected." {
-                        format!("{message} {} undoes the last fix.", self.shortcuts.0[1])
+                        self.language.format(
+                            "Text corrected. {shortcut} undoes the last fix.",
+                            &[("shortcut", &self.shortcuts.0[1].to_string())],
+                        )
                     } else {
                         message
                     };
@@ -1025,7 +1227,12 @@ impl App {
             Err(error) => {
                 self.update_status = format!("Could not start the update: {error}");
                 if !startup {
-                    about::update_status(self.window, &self.update_status, true);
+                    about::update_status(
+                        self.window,
+                        &self.language.message(&self.update_status),
+                        true,
+                        self.language,
+                    );
                 }
             }
         }
@@ -1035,7 +1242,7 @@ impl App {
             self.check_updates();
             return;
         }
-        if about::offer_update(self.window, &update) {
+        if about::offer_update(self.window, &update, self.language) {
             self.open();
             self.start_update(Some(update), false);
         }
@@ -1057,7 +1264,7 @@ impl App {
             && job.installing
             && !self.exit_requested
         {
-            self.set_text(self.subtitle, &job.progress.text());
+            self.set_text(self.subtitle, &job.progress.text(self.language));
         }
         let result = self
             .update
@@ -1082,14 +1289,20 @@ impl App {
         }
         match result {
             UpdateResult::Checked(Ok(Some(update))) => {
-                self.update_status = format!("Version {} is available.", update.version);
+                self.update_status = self.language.format(
+                    "Version {version} is available.",
+                    &[("version", &update.version.to_string())],
+                );
                 self.available_update = Some(update.clone());
                 if startup {
                     self.set_text(
                         self.subtitle,
-                        &format!("{} Open About to update.", self.update_status),
+                        &self.language.format(
+                            "{status} Open About to update.",
+                            &[("status", &self.update_status)],
+                        ),
                     );
-                    self.notify(&format!("Version {} is available. Open About or the tray menu to download and install it.",update.version));
+                    self.notify(&self.language.format("Version {version} is available. Open About or the tray menu to download and install it.", &[("version", &update.version.to_string())]));
                 } else {
                     self.set_text(self.subtitle, &self.update_status);
                     self.offer_update(update);
@@ -1102,11 +1315,12 @@ impl App {
                     self.set_text(self.subtitle, &self.update_status);
                     about::update_status(
                         self.window,
-                        &format!(
-                            "You are up to date. Installed version: {}.",
-                            env!("CARGO_PKG_VERSION")
+                        &self.language.format(
+                            "You are up to date. Installed version: {version}.",
+                            &[("version", env!("CARGO_PKG_VERSION"))],
                         ),
                         false,
+                        self.language,
                     );
                 }
             }
@@ -1117,7 +1331,12 @@ impl App {
                         self.subtitle,
                         "Update failed. Your current app is unchanged.",
                     );
-                    about::update_status(self.window, &error, true);
+                    about::update_status(
+                        self.window,
+                        &self.language.message(&error),
+                        true,
+                        self.language,
+                    );
                 }
             }
             UpdateResult::Installed(Ok(())) => {
@@ -1168,17 +1387,17 @@ impl App {
             let width = bounds.right;
             let height = bounds.bottom;
             let scene = Scene {
-                background: BG,
+                background: self.color(BG),
                 cards: [
                     Card {
                         rect: [24, 85, 416, 51],
                         radius: 7,
-                        color: GREEN,
+                        color: self.color(GREEN),
                     },
                     Card {
                         rect: [24, 307, 416, 90],
                         radius: 7,
-                        color: WHITE,
+                        color: self.color(WHITE),
                     },
                 ],
             };
@@ -1214,13 +1433,13 @@ impl App {
                         );
                     }
                     if !surface.present(dc, paint.rcPaint) {
-                        FillRect(dc, &paint.rcPaint, self.brush(BG));
+                        FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
                     }
                 } else {
-                    FillRect(dc, &paint.rcPaint, self.brush(BG));
+                    FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
                 }
             } else {
-                FillRect(dc, &paint.rcPaint, self.brush(BG));
+                FillRect(dc, &paint.rcPaint, self.brush(self.color(BG)));
             }
             EndPaint(self.window, &paint);
         }
@@ -1233,12 +1452,56 @@ impl App {
             .find(|widget| widget.handle == child)
             .map(|widget| (widget.foreground, widget.background))
             .unwrap_or((INK, BG));
+        let colors = (self.color(colors.0), self.color(colors.1));
         // SAFETY: dc is supplied by WM_CTLCOLOR* and remains valid during this callback.
         unsafe {
             SetTextColor(dc, colors.0);
             SetBkColor(dc, colors.1);
         }
         self.brush(colors.1) as LRESULT
+    }
+    fn draw_button(&mut self, item: &DRAWITEMSTRUCT) {
+        let Some(widget) = self
+            .widgets
+            .iter()
+            .find(|widget| widget.handle == item.hwndItem)
+        else {
+            return;
+        };
+        let foreground = self.color(if item.itemState & ODS_DISABLED != 0 {
+            MUTED
+        } else {
+            widget.foreground
+        });
+        let background = self.color(if item.itemState & ODS_SELECTED != 0 {
+            PALE
+        } else {
+            widget.background
+        });
+        let font = self.fonts[widget.font];
+        let text = window_text(item.hwndItem);
+        let brush = self.brush(background);
+        // SAFETY: WM_DRAWITEM owns this DC for the callback; selected objects are restored.
+        unsafe {
+            FillRect(item.hDC, &item.rcItem, brush);
+            FrameRect(item.hDC, &item.rcItem, self.brush(self.color(MUTED)));
+            let old = SelectObject(item.hDC, font);
+            SetBkMode(item.hDC, TRANSPARENT as i32);
+            SetTextColor(item.hDC, foreground);
+            let mut rect = item.rcItem;
+            DrawTextW(
+                item.hDC,
+                wide(&text).as_ptr(),
+                -1,
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            if item.itemState & ODS_FOCUS != 0 {
+                InflateRect(&mut rect, -3, -3);
+                DrawFocusRect(item.hDC, &rect);
+            }
+            SelectObject(item.hDC, old);
+        }
     }
     fn dpi_changed(&mut self, dpi: u32, suggested: *const RECT) {
         #[cfg(feature = "desktop-tests")]
@@ -1296,23 +1559,26 @@ impl App {
                 menu,
                 MF_STRING,
                 OPEN_ID,
-                wide("Open Magic Language Switcher").as_ptr(),
+                wide(self.language.text("Open Magic Language Switcher")).as_ptr(),
             );
             AppendMenuW(
                 menu,
                 MF_STRING,
                 TRAY_PAUSE_ID,
-                wide(if self.enabled {
+                wide(self.language.text(if self.enabled {
                     "Pause corrections"
                 } else {
                     "Resume corrections"
-                })
+                }))
                 .as_ptr(),
             );
             let update_label = if self.update.is_some() {
                 "Update in progress...".into()
             } else if let Some(update) = &self.available_update {
-                format!("Download and install v{}...", update.version)
+                self.language.format(
+                    "Download and install v{version}...",
+                    &[("version", &update.version.to_string())],
+                )
             } else {
                 "Check for updates".into()
             };
@@ -1325,10 +1591,15 @@ impl App {
                         0
                     },
                 UPDATE_ID,
-                wide(&update_label).as_ptr(),
+                wide(&self.language.message(&update_label)).as_ptr(),
             );
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
-            AppendMenuW(menu, MF_STRING, QUIT_ID, wide("Quit").as_ptr());
+            AppendMenuW(
+                menu,
+                MF_STRING,
+                QUIT_ID,
+                wide(self.language.text("Quit")).as_ptr(),
+            );
             let mut point = POINT::default();
             GetCursorPos(&mut point);
             SetForegroundWindow(self.window);
@@ -1428,7 +1699,11 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
                 WM_ERASEBKGND => return 1,
-                WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT => {
+                WM_DRAWITEM => {
+                    app.draw_button(&*(lparam as *const DRAWITEMSTRUCT));
+                    return 1;
+                }
+                WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
                     return app.color_control(wparam as HDC, lparam as HWND);
                 }
                 WM_COMMAND => {
@@ -1696,12 +1971,12 @@ pub fn run() -> Result<(), String> {
         let mut area = RECT::default();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut RECT as *mut _, 0);
         let scale = (GetDpiForSystem() as f32 / 96.0)
-            .min(((area.bottom - area.top - 64) as f32 / 487.0).max(0.75));
+            .min(((area.bottom - area.top - 64) as f32 / 555.0).max(0.75));
         let app = Box::new(RefCell::new(App::new(instance, icon, scale, diagnostic)));
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
         let mut bounds = RECT {
             right: (464.0 * scale) as i32,
-            bottom: (487.0 * scale) as i32,
+            bottom: (555.0 * scale) as i32,
             ..Default::default()
         };
         AdjustWindowRectExForDpi(&mut bounds, style, 0, 0, (scale * 96.0) as u32);

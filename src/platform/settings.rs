@@ -1,5 +1,6 @@
 use super::native::wide;
 use crate::{
+    i18n::{Language, Theme},
     layout::Selection,
     shortcuts::{Shortcut, Shortcuts},
 };
@@ -13,6 +14,8 @@ const STARTUP_NAME: &str = "MagicLanguageSwitcher";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preferences {
     pub selection: Selection,
+    pub language: Language,
+    pub theme: Theme,
     pub shortcuts: Shortcuts,
     pub startup_update_checks: bool,
 }
@@ -20,6 +23,8 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             selection: Selection::default(),
+            language: Language::default(),
+            theme: Theme::default(),
             shortcuts: Shortcuts::default(),
             startup_update_checks: true,
         }
@@ -51,6 +56,8 @@ fn parse_preferences(text: &str) -> Preferences {
     for line in text.lines() {
         if let Some((name, value)) = line.split_once('=') {
             match name.trim() {
+                "language" => preferences.language = Language::parse(value.trim()),
+                "theme" => preferences.theme = Theme::parse(value.trim()),
                 "check_updates_on_startup" => {
                     preferences.startup_update_checks = value.trim() != "false"
                 }
@@ -81,12 +88,14 @@ fn parse_preferences(text: &str) -> Preferences {
 fn serialize(preferences: Preferences) -> String {
     let value = |id: Option<u32>| id.map_or_else(|| "auto".into(), |id| format!("{id:08X}"));
     format!(
-        "source={}\ndestination={}\nhotkey_correct={}\nhotkey_undo={}\ncheck_updates_on_startup={}\n",
+        "source={}\ndestination={}\nhotkey_correct={}\nhotkey_undo={}\ncheck_updates_on_startup={}\nlanguage={}\ntheme={}\n",
         value(preferences.selection.from),
         value(preferences.selection.to),
         preferences.shortcuts.0[0].encode(),
         preferences.shortcuts.0[1].encode(),
-        preferences.startup_update_checks
+        preferences.startup_update_checks,
+        preferences.language.code(),
+        preferences.theme.code()
     )
 }
 
@@ -207,6 +216,27 @@ mod tests {
         preferences.selection.to = Some(0x419);
         assert_eq!(parse_preferences(&serialize(preferences)), preferences);
         assert!(parse_preferences("check_updates_on_startup=invalid").startup_update_checks);
+    }
+
+    #[test]
+    fn appearance_preferences_round_trip_without_changing_conversion_or_shortcuts() {
+        let old =
+            parse_preferences("source=00000409\ndestination=00000419\nhotkey_correct=0002:004B");
+        assert_eq!(old.language, Language::English);
+        assert_eq!(old.theme, Theme::Light);
+        for language in Language::ALL {
+            for theme in [Theme::Light, Theme::Dark] {
+                let mut changed = old;
+                changed.language = language;
+                changed.theme = theme;
+                assert_eq!(parse_preferences(&serialize(changed)), changed);
+                assert_eq!(changed.selection, old.selection);
+                assert_eq!(changed.shortcuts, old.shortcuts);
+            }
+        }
+        let invalid = parse_preferences("language=unknown\ntheme=unknown");
+        assert_eq!(invalid.language, Language::English);
+        assert_eq!(invalid.theme, Theme::Light);
     }
 
     #[test]

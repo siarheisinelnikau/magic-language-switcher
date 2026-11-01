@@ -1,4 +1,5 @@
 use super::native::wide;
+use crate::i18n::Language;
 use std::{mem::size_of, ptr::null_mut};
 use windows_sys::Win32::{
     Foundation::*,
@@ -16,25 +17,32 @@ pub fn show(
     icon: HICON,
     startup_checks: bool,
     update_status: &str,
+    language: Language,
 ) -> Option<Choice> {
-    let title = wide("About Magic Language Switcher");
+    let title = wide(language.text("About Magic Language Switcher"));
     let heading = wide("Magic Language Switcher");
-    let content = wide(&format!(
-        "Version {}\n\nFix text typed in the wrong keyboard layout.\nWorks with the keyboard layouts installed in Windows.\n\n{update_status}\n\nBuilt with Rust. One portable EXE.",
-        env!("CARGO_PKG_VERSION"),
-    ));
+    let content = wide(&language.format("Version {version}\n\nFix text typed in the wrong keyboard layout.\nWorks with the keyboard layouts installed in Windows.\n\n{status}\n\nBuilt with Rust. One portable EXE.", &[("version", env!("CARGO_PKG_VERSION")), ("status", update_status)]));
     let footer = wide(&format!(
-        "<a href=\"{REPOSITORY}\">GitHub repository</a>\nCopyright © 2026 siarheisinelnikau"
+        "<a href=\"{REPOSITORY}\">{}</a>\nCopyright © 2026 siarheisinelnikau",
+        language.text("GitHub repository")
     ));
     let license = wide(include_str!("../../LICENSE"));
-    let expand = wide("MIT license");
-    let collapse = wide("Hide license");
-    let check = wide("Check for updates");
-    let verification = wide("Check for updates on startup");
+    let expand = wide(language.text("MIT license"));
+    let collapse = wide(language.text("Hide license"));
+    let check = wide(language.text("Check for updates"));
+    let verification = wide(language.text("Check for updates on startup"));
     let button = TASKDIALOG_BUTTON {
         nButtonID: 100,
         pszButtonText: check.as_ptr(),
     };
+    let close = wide(language.text("Close"));
+    let buttons = [
+        button,
+        TASKDIALOG_BUTTON {
+            nButtonID: 101,
+            pszButtonText: close.as_ptr(),
+        },
+    ];
     let configuration = TASKDIALOGCONFIG {
         cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
         hwndParent: parent,
@@ -47,9 +55,9 @@ pub fn show(
             } else {
                 0
             },
-        dwCommonButtons: TDCBF_CLOSE_BUTTON,
-        cButtons: 1,
-        pButtons: &button,
+        dwCommonButtons: 0,
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
         pszWindowTitle: title.as_ptr(),
         pszMainInstruction: heading.as_ptr(),
         pszContent: content.as_ptr(),
@@ -86,26 +94,33 @@ pub fn show(
     })
 }
 
-pub fn offer_update(parent: HWND, update: &crate::updates::Update) -> bool {
-    let title = wide("Magic Language Switcher update");
-    let heading = wide(&format!("Version {} is available", update.version));
-    let content = wide(&format!(
-        "Installed: {}\nDownload: {:.1} MB\n\nDownload from GitHub, verify SHA-256, and restart the app. Your settings and EXE location will be kept.",
-        env!("CARGO_PKG_VERSION"),
-        update.executable_size() as f64 / 1048576.0
+pub fn offer_update(parent: HWND, update: &crate::updates::Update, language: Language) -> bool {
+    let title = wide(language.text("Magic Language Switcher update"));
+    let heading = wide(&language.format(
+        "Version {version} is available",
+        &[("version", &update.version.to_string())],
     ));
-    let label = wide("Download and install");
+    let content = wide(&language.format("Installed: {version}\nDownload: {size} MB\n\nDownload from GitHub, verify SHA-256, and restart the app. Your settings and EXE location will be kept.", &[("version", env!("CARGO_PKG_VERSION")), ("size", &format!("{:.1}", update.executable_size() as f64 / 1048576.0))]));
+    let label = wide(language.text("Download and install"));
     let button = TASKDIALOG_BUTTON {
         nButtonID: 100,
         pszButtonText: label.as_ptr(),
     };
+    let cancel = wide(language.text("Cancel"));
+    let buttons = [
+        button,
+        TASKDIALOG_BUTTON {
+            nButtonID: 101,
+            pszButtonText: cancel.as_ptr(),
+        },
+    ];
     let config = TASKDIALOGCONFIG {
         cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
         hwndParent: parent,
         dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT,
-        dwCommonButtons: TDCBF_CANCEL_BUTTON,
-        cButtons: 1,
-        pButtons: &button,
+        dwCommonButtons: 0,
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
         pszWindowTitle: title.as_ptr(),
         pszMainInstruction: heading.as_ptr(),
         pszContent: content.as_ptr(),
@@ -120,13 +135,13 @@ pub fn offer_update(parent: HWND, update: &crate::updates::Update) -> bool {
     selected == 100
 }
 
-pub fn update_status(parent: HWND, message: &str, failed: bool) {
+pub fn update_status(parent: HWND, message: &str, failed: bool, language: Language) {
     // SAFETY: both terminated strings remain live during the synchronous dialog.
     unsafe {
         MessageBoxW(
             parent,
             wide(message).as_ptr(),
-            wide("Magic Language Switcher update").as_ptr(),
+            wide(language.text("Magic Language Switcher update")).as_ptr(),
             MB_OK
                 | if failed {
                     MB_ICONERROR
